@@ -33,6 +33,8 @@
   "slack_token",
   "slack_api_url",
   "slack_post_message_url",
+  "clockify_api_key",
+  "clockify_workspace_id",
   "security_tab",
   "security",
   "session_expiry",
@@ -716,12 +718,22 @@
    "fieldname": "slack_post_message_url",
    "fieldtype": "Data",
    "label": "Slack Post Message URL"
+  },
+  {
+   "fieldname": "clockify_api_key",
+   "fieldtype": "Data",
+   "label": "Clockify API Key"
+  },
+  {
+   "fieldname": "clockify_workspace_id",
+   "fieldtype": "Small Text",
+   "label": "Clockify Workspace ID"
   }
  ],
  "icon": "fa fa-cog",
  "issingle": 1,
  "links": [],
- "modified": "2025-02-10 14:24:15.914793",
+ "modified": "2025-03-26 11:37:37.675951",
  "modified_by": "Administrator",
  "module": "Core",
  "name": "System Settings",
