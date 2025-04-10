@@ -38,66 +38,40 @@ def get(args=None):
 		limit=5,
 	)
 
-
-@frappe.whitelist()
-def add(args=None, *, ignore_permissions=False):
-	"""add in someone's to do list
-	args = {
-	        "assign_to": [],
-	        "doctype": ,
-	        "name": ,
-	        "description": ,
-	        "assignment_rule":
-	}
-
-	"""
-	if not args:
-		args = frappe.local.form_dict
-
-	users_with_duplicate_todo = []
-	shared_with_users = []
-
-	description = escape_html(
-		args.get("description", _("Assignment for {0} {1}").format(args["doctype"], args["name"]))
-	)
-
-	for assign_to in frappe.parse_json(args.get("assign_to")):
+def create_assignment(assign_to, args, description, ignore_permissions, users_with_duplicate_todo, shared_with_users):
 		filters = {
-			"reference_type": args["doctype"],
-			"reference_name": args["name"],
-			"status": "Open",
-			"allocated_to": assign_to,
-		}
+					"reference_type": args["doctype"],
+					"reference_name": args["name"],
+					"status": "Open",
+					"allocated_to": assign_to,
+				}
 		if not ignore_permissions:
 			frappe.get_doc(args["doctype"], args["name"]).check_permission()
 
 		if frappe.get_all("ToDo", filters=filters):
 			users_with_duplicate_todo.append(assign_to)
+			return
 		else:
 			from frappe.utils import nowdate
 
-			d = frappe.get_doc(
-				{
-					"doctype": "ToDo",
-					"allocated_to": assign_to,
-					"reference_type": args["doctype"],
-					"reference_name": args["name"],
-					"description": description,
-					"priority": args.get("priority", "Medium"),
-					"status": "Open",
-					"date": args.get("date", nowdate()),
-					"assigned_by": args.get("assigned_by", frappe.session.user),
-					"assignment_rule": args.get("assignment_rule"),
-				}
-			).insert(ignore_permissions=True)
+			d = frappe.get_doc({
+				"doctype": "ToDo",
+				"allocated_to": assign_to,
+				"reference_type": args["doctype"],
+				"reference_name": args["name"],
+				"description": description,
+				"priority": args.get("priority", "Medium"),
+				"status": "Open",
+				"date": args.get("date", nowdate()),
+				"assigned_by": args.get("assigned_by", frappe.session.user),
+				"assignment_rule": args.get("assignment_rule"),
+			}).insert(ignore_permissions=True)
 
-			# set assigned_to if field exists
 			if frappe.get_meta(args["doctype"]).get_field("assigned_to"):
 				frappe.db.set_value(args["doctype"], args["name"], "assigned_to", assign_to)
 
 			doc = frappe.get_doc(args["doctype"], args["name"])
 
-			# if assignee does not have permissions, share or inform
 			if not frappe.has_permission(doc=doc, user=assign_to):
 				if frappe.get_system_settings("disable_document_sharing"):
 					msg = _("User {0} is not permitted to access this document.").format(
@@ -111,11 +85,9 @@ def add(args=None, *, ignore_permissions=False):
 					frappe.share.add(doc.doctype, doc.name, assign_to)
 					shared_with_users.append(assign_to)
 
-			# make this document followed by assigned user
 			if frappe.get_cached_value("User", assign_to, "follow_assigned_documents"):
 				follow_document(args["doctype"], args["name"], assign_to)
 
-			# notify
 			notify_assignment(
 				d.assigned_by,
 				d.allocated_to,
@@ -124,6 +96,68 @@ def add(args=None, *, ignore_permissions=False):
 				action="ASSIGN",
 				description=description,
 			)
+
+@frappe.whitelist()
+def add(args=None, *, ignore_permissions=False):
+	"""add in someone's to do list
+	args = {
+	        "assign_to": [],
+	        "doctype": ,
+	        "name": ,
+	        "description": ,
+	        "assignment_rule":
+	}
+	Add a ToDo (assignment) for one or more assignees.
+		This function now processes:
+		- Individual users from the "assign_to" field.
+		- Employee Groups from the "assign_to_employee_group" field.
+			For each employee group, it creates assignments for all employees
+			listed in the child table "Employee Group Employee".
+		
+		args should be a JSON string with keys:
+		- "assign_to": JSON list of individual assignee user IDs.
+		- "assign_to_employee_group": JSON list of Employee Group names.
+		- "doctype", "name", "description", "priority", "date", etc.
+	"""
+	if not args:
+		args = frappe.local.form_dict
+	frappe.log_error(message=str(args), title="ARGUMENTS")
+	users_with_duplicate_todo = []
+	shared_with_users = []
+
+	description = escape_html(
+		args.get("description", _("Assignment for {0} {1}").format(args["doctype"], args["name"]))
+	)
+
+	for assign_to in frappe.parse_json(args.get("assign_to") or "[]"):
+		create_assignment(assign_to, args, description,ignore_permissions,users_with_duplicate_todo, shared_with_users)
+
+	# --- New block for processing Employee Groups ---
+	# Process employee group assignments, if provided
+	for group in frappe.parse_json(args.get("assign_to_employee_group") or '[]'):
+		if frappe.db.exists("Employee Group", group):
+			# Fetch employees from the child table "Employee Group Table" with proper filters
+			employees = frappe.get_all("Employee Group Table", 
+				filters={
+					"parent": group,
+					"parentfield": "employee_list",
+					"parenttype": "Employee Group"
+				},
+				fields=["employee"]
+			)
+			for row in employees:
+				employee_id = row.employee
+				# Lookup the system user linked to the employee
+				system_user = frappe.db.get_value("Employee", employee_id, "user_id")
+				if not system_user:
+					frappe.msgprint(_("Employee {0} does not have an associated system user. Skipping assignment.").format(employee_id))
+					continue
+
+				assign_to = system_user  # Use the system user for assignment
+				create_assignment(assign_to,args,description,ignore_permissions,users_with_duplicate_todo,shared_with_users)
+			
+		else:
+			frappe.msgprint(_("Employee Group {0} does not exist.").format(group))
 
 	if shared_with_users:
 		user_list = format_message_for_assign_to(shared_with_users)

@@ -101,7 +101,7 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 			primary_action: function () {
 				let args = me.dialog.get_values();
 
-				if (args && args.assign_to) {
+				if (args && (args.assign_to || args.assign_to_employee_group)) {
 					me.dialog.set_message("Assigning...");
 
 					frappe.call({
@@ -110,6 +110,7 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 							doctype: me.doctype,
 							name: me.docname,
 							assign_to: args.assign_to,
+							assign_to_employee_group: args.assign_to_employee_group,
 							bulk_assign: me.bulk_assign || false,
 							re_assign: me.re_assign || false,
 						}),
@@ -139,6 +140,21 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 
 		me.dialog.set_value("assign_to", assign_to);
 	}
+	employee_group_list() {
+		let me = this;
+		me.dialog.set_value("assign_to_me", 0);
+	
+		// Fetch Employee Groups directly
+		frappe.db.get_list("Employee Group", {
+			fields: ["employee_group_name"]  
+		}).then((response) => {
+			// Create a newline-separated string of options for the MultiSelectPills field
+			let employee_groups = response.map((group) => group.name).join("\n");
+			me.dialog.fields_dict.assign_to_employee_group.df.options = employee_groups;
+			me.dialog.refresh_field("assign_to_employee_group");
+		});
+	}	
+	
 	user_group_list() {
 		let me = this;
 		let user_group = me.dialog.get_value("assign_to_user_group");
@@ -177,17 +193,18 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 				onchange: () => me.assign_to_me(),
 			},
 			{
-				label: __("Assign To User Group"),
-				fieldtype: "Link",
-				fieldname: "assign_to_user_group",
-				options: "User Group",
-				onchange: () => me.user_group_list(),
+				label: __("Assign To Employee Group"),
+				fieldtype: "MultiSelectPills",
+				fieldname: "assign_to_employee_group",
+				// options: "Employee Group",
+				get_data: function (txt) {
+					return frappe.db.get_link_options("Employee Group", txt);
+				},
 			},
 			{
 				fieldtype: "MultiSelectPills",
 				fieldname: "assign_to",
 				label: __("Assign To"),
-				reqd: true,
 				get_data: function (txt) {
 					return frappe.db.get_link_options("User", txt, {
 						user_type: "System User",
@@ -265,6 +282,7 @@ frappe.ui.form.AssignmentDialog = class {
 							this.assigning = true;
 							this.dialog.set_df_property("user", "read_only", 1);
 							this.dialog.set_df_property("user", "description", __("Assigning..."));
+							console.log("after assigning");
 							this.add_assignment(value)
 								.then(() => {
 									this.dialog.set_value("user", null);
@@ -296,6 +314,7 @@ frappe.ui.form.AssignmentDialog = class {
 		this.frm && this.frm.assign_to.render(assignments);
 	}
 	add_assignment(assignment) {
+		console.log("add btn called");
 		return frappe
 			.xcall("frappe.desk.form.assign_to.add", {
 				doctype: this.frm.doctype,
