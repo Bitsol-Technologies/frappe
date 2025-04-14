@@ -184,6 +184,7 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 	get_fields() {
 		let me = this;
 
+
 		return [
 			{
 				label: __("Assign to me"),

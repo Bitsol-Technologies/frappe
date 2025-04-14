@@ -165,6 +165,8 @@ def add(args=None, *, ignore_permissions=False):
 			_("Shared with the following Users with Read access:{0}").format(user_list, alert=True)
 		)
 
+		
+
 	if users_with_duplicate_todo:
 		user_list = format_message_for_assign_to(users_with_duplicate_todo)
 		frappe.msgprint(_("Already in the following Users ToDo list:{0}").format(user_list, alert=True))
