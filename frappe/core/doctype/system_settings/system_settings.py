@@ -70,6 +70,7 @@ class SystemSettings(Document):
 		max_file_size: DF.Int
 		minimum_password_score: DF.Literal["2", "3", "4"]
 		number_format: DF.Literal["#,###.##", "#.###,##", "# ###.##", "# ###,##", "#'###.##", "#, ###.##", "#,##,###.##", "#,###.###", "#.###", "#,###"]
+		operation_compliance_channel: DF.Data | None
 		otp_issuer_name: DF.Data | None
 		password_reset_limit: DF.Int
 		rate_limit_email_link_login: DF.Int
