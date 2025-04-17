@@ -101,74 +101,75 @@ def add(args=None, *, ignore_permissions=False):
 
 		else:
 			frappe.msgprint(_("Employee Group {0} does not exist.").format(group))
+
 def create_assignment(assign_to, args, description, ignore_permissions, users_with_duplicate_todo, shared_with_users):
-		filters = {
-			"reference_type": args["doctype"],
-			"reference_name": args["name"],
-			"status": "Open",
-			"allocated_to": assign_to,
-		}
-		if not ignore_permissions:
-			frappe.get_doc(args["doctype"], args["name"]).check_permission()
+	filters = {
+		"reference_type": args["doctype"],
+		"reference_name": args["name"],
+		"status": "Open",
+		"allocated_to": assign_to,
+	}
+	if not ignore_permissions:
+		frappe.get_doc(args["doctype"], args["name"]).check_permission()
 
-		if frappe.get_all("ToDo", filters=filters):
-			users_with_duplicate_todo.append(assign_to)
-		else:
-			from frappe.utils import nowdate
+	if frappe.get_all("ToDo", filters=filters):
+		users_with_duplicate_todo.append(assign_to)
+	else:
+		from frappe.utils import nowdate
 
-			description = str(args.get("description", ""))
-			has_content = strip_html(description) or "<img" in description
-			if not has_content:
-				args["description"] = _("Assignment for {0} {1}").format(args["doctype"], args["name"])
+		description = str(args.get("description", ""))
+		has_content = strip_html(description) or "<img" in description
+		if not has_content:
+			args["description"] = _("Assignment for {0} {1}").format(args["doctype"], args["name"])
 
-			d = frappe.get_doc(
-				{
-					"doctype": "ToDo",
-					"allocated_to": assign_to,
-					"reference_type": args["doctype"],
-					"reference_name": args["name"],
-					"description": args.get("description"),
-					"priority": args.get("priority", "Medium"),
-					"status": "Open",
-					"date": args.get("date", nowdate()),
-					"assigned_by": args.get("assigned_by", frappe.session.user),
-					"assignment_rule": args.get("assignment_rule"),
-				}
-			).insert(ignore_permissions=True)
+		d = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"allocated_to": assign_to,
+				"reference_type": args["doctype"],
+				"reference_name": args["name"],
+				"description": args.get("description"),
+				"priority": args.get("priority", "Medium"),
+				"status": "Open",
+				"date": args.get("date", nowdate()),
+				"assigned_by": args.get("assigned_by", frappe.session.user),
+				"assignment_rule": args.get("assignment_rule"),
+			}
+		).insert(ignore_permissions=True)
 
-			# set assigned_to if field exists
-			if frappe.get_meta(args["doctype"]).get_field("assigned_to"):
-				frappe.db.set_value(args["doctype"], args["name"], "assigned_to", assign_to)
+		# set assigned_to if field exists
+		if frappe.get_meta(args["doctype"]).get_field("assigned_to"):
+			frappe.db.set_value(args["doctype"], args["name"], "assigned_to", assign_to)
 
-			doc = frappe.get_doc(args["doctype"], args["name"])
+		doc = frappe.get_doc(args["doctype"], args["name"])
 
-			# if assignee does not have permissions, share or inform
-			if not frappe.has_permission(doc=doc, user=assign_to):
-				if frappe.get_system_settings("disable_document_sharing"):
-					msg = _("User {0} is not permitted to access this document.").format(
-						frappe.bold(assign_to)
-					)
-					msg += "<br>" + _(
-						"As document sharing is disabled, please give them the required permissions before assigning."
-					)
-					frappe.throw(msg, title=_("Missing Permission"))
-				else:
-					frappe.share.add(doc.doctype, doc.name, assign_to)
-					shared_with_users.append(assign_to)
+		# if assignee does not have permissions, share or inform
+		if not frappe.has_permission(doc=doc, user=assign_to):
+			if frappe.get_system_settings("disable_document_sharing"):
+				msg = _("User {0} is not permitted to access this document.").format(
+					frappe.bold(assign_to)
+				)
+				msg += "<br>" + _(
+					"As document sharing is disabled, please give them the required permissions before assigning."
+				)
+				frappe.throw(msg, title=_("Missing Permission"))
+			else:
+				frappe.share.add(doc.doctype, doc.name, assign_to)
+				shared_with_users.append(assign_to)
 
-			# make this document followed by assigned user
-			if frappe.get_cached_value("User", assign_to, "follow_assigned_documents"):
-				follow_document(args["doctype"], args["name"], assign_to)
+		# make this document followed by assigned user
+		if frappe.get_cached_value("User", assign_to, "follow_assigned_documents"):
+			follow_document(args["doctype"], args["name"], assign_to)
 
-			# notify
-			notify_assignment(
-				d.assigned_by,
-				d.allocated_to,
-				d.reference_type,
-				d.reference_name,
-				action="ASSIGN",
-				description=args.get("description"),
-			)
+		# notify
+		notify_assignment(
+			d.assigned_by,
+			d.allocated_to,
+			d.reference_type,
+			d.reference_name,
+			action="ASSIGN",
+			description=args.get("description"),
+		)
 
 	if shared_with_users:
 		user_list = format_message_for_assign_to(shared_with_users)
@@ -346,61 +347,3 @@ def notify_assignment(assigned_by, allocated_to, doc_type, doc_name, action="CLO
 def format_message_for_assign_to(users):
 	return "<br><br>" + "<br>".join(users)
 
-def create_assignment(assign_to, args, description, ignore_permissions, users_with_duplicate_todo, shared_with_users):
-		filters = {
-					"reference_type": args["doctype"],
-					"reference_name": args["name"],
-					"status": "Open",
-					"allocated_to": assign_to,
-				}
-		if not ignore_permissions:
-			frappe.get_doc(args["doctype"], args["name"]).check_permission()
-
-		if frappe.get_all("ToDo", filters=filters):
-			users_with_duplicate_todo.append(assign_to)
-			return
-		else:
-			from frappe.utils import nowdate
-
-			d = frappe.get_doc({
-				"doctype": "ToDo",
-				"allocated_to": assign_to,
-				"reference_type": args["doctype"],
-				"reference_name": args["name"],
-				"description": description,
-				"priority": args.get("priority", "Medium"),
-				"status": "Open",
-				"date": args.get("date", nowdate()),
-				"assigned_by": args.get("assigned_by", frappe.session.user),
-				"assignment_rule": args.get("assignment_rule"),
-			}).insert(ignore_permissions=True)
-
-			if frappe.get_meta(args["doctype"]).get_field("assigned_to"):
-				frappe.db.set_value(args["doctype"], args["name"], "assigned_to", assign_to)
-
-			doc = frappe.get_doc(args["doctype"], args["name"])
-
-			if not frappe.has_permission(doc=doc, user=assign_to):
-				if frappe.get_system_settings("disable_document_sharing"):
-					msg = _("User {0} is not permitted to access this document.").format(
-						frappe.bold(assign_to)
-					)
-					msg += "<br>" + _(
-						"As document sharing is disabled, please give them the required permissions before assigning."
-					)
-					frappe.throw(msg, title=_("Missing Permission"))
-				else:
-					frappe.share.add(doc.doctype, doc.name, assign_to)
-					shared_with_users.append(assign_to)
-
-			if frappe.get_cached_value("User", assign_to, "follow_assigned_documents"):
-				follow_document(args["doctype"], args["name"], assign_to)
-
-			notify_assignment(
-				d.assigned_by,
-				d.allocated_to,
-				d.reference_type,
-				d.reference_name,
-				action="ASSIGN",
-				description=description,
-			)
