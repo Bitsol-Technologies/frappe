@@ -89,6 +89,7 @@ class SystemSettings(Document):
 		two_factor_method: DF.Literal["OTP App", "SMS", "Email"]
 		use_number_format_from_currency: DF.Check
 		welcome_email_template: DF.Link | None
+		wfh_leave_channel: DF.Data | None
 	# end: auto-generated types
 
 	def validate(self):
