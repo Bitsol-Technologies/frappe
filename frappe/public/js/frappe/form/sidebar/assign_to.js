@@ -149,7 +149,7 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 			fields: ["employee_group_name"]  
 		}).then((response) => {
 			// Create a newline-separated string of options for the MultiSelectPills field
-			let employee_groups = response.map((group) => group.name).join("\n");
+			let employee_groups = response.map((group) => group.employee_group_name).join("\n");
 			me.dialog.fields_dict.assign_to_employee_group.df.options = employee_groups;
 			me.dialog.refresh_field("assign_to_employee_group");
 		});
