@@ -64,7 +64,6 @@ def add(args=None, *, ignore_permissions=False):
 	"""
 	if not args:
 		args = frappe.local.form_dict
-	frappe.log_error(message=str(args), title="ARGUMENTS")
 	users_with_duplicate_todo = []
 	shared_with_users = []
 
