@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "allow_import": 1,
  "allow_rename": 1,
  "autoname": "Prompt",
  "creation": "2019-02-28 17:12:18.815830",
@@ -154,7 +155,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2021-07-16 22:51:35.505575",
+ "modified": "2024-11-08 13:01:24.513099",
  "modified_by": "Administrator",
  "module": "Automation",
  "name": "Assignment Rule",
@@ -175,5 +176,6 @@
  ],
  "sort_field": "modified",
  "sort_order": "DESC",
+ "states": [],
  "track_changes": 1
 }
