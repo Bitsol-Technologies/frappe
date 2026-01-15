@@ -109,7 +109,12 @@
   "api_secret",
   "onboarding_status",
   "connections_tab",
-   "slack_uid"
+  "slack_uid",
+  "notifications_tab",
+  "notifications_section",
+  "is_clockify_active",
+  "is_birthday_notification_active",
+  "is_anniversary_notification_active"
  ],
  "fields": [
   {
@@ -754,8 +759,7 @@
    "description": "Redirect to the selected app after login",
    "fieldname": "default_app",
    "fieldtype": "Select",
-   "label": "Default App",
-   "options": ""
+   "label": "Default App"
   },
   {
    "collapsible": 1,
@@ -822,6 +826,34 @@
    "fieldname": "dashboard",
    "fieldtype": "Check",
    "label": "Dashboard"
+  },
+  {
+   "fieldname": "notifications_section",
+   "fieldtype": "Section Break",
+   "label": "Notifications"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_clockify_active",
+   "fieldtype": "Check",
+   "label": "Send clockify notification"
+  },
+  {
+   "fieldname": "notifications_tab",
+   "fieldtype": "Tab Break",
+   "label": "Notifications"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_birthday_notification_active",
+   "fieldtype": "Check",
+   "label": "Send birthday notification"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_anniversary_notification_active",
+   "fieldtype": "Check",
+   "label": "Send anniversary reminder"
   }
  ],
  "icon": "fa fa-user",
@@ -885,7 +917,7 @@
   }
  ],
  "make_attachments_public": 1,
- "modified": "2025-03-17 11:29:39.254304",
+ "modified": "2025-12-05 16:55:15.861441",
  "modified_by": "Administrator",
  "module": "Core",
  "name": "User",

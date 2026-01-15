@@ -95,6 +95,9 @@ class User(Document):
 		gender: DF.Link | None
 		home_settings: DF.Code | None
 		interest: DF.SmallText | None
+		is_anniversary_notification_active: DF.Check
+		is_birthday_notification_active: DF.Check
+		is_clockify_active: DF.Check
 		language: DF.Link | None
 		last_active: DF.Datetime | None
 		last_ip: DF.ReadOnly | None
@@ -125,6 +128,7 @@ class User(Document):
 		send_me_a_copy: DF.Check
 		send_welcome_email: DF.Check
 		simultaneous_sessions: DF.Int
+		slack_uid: DF.Data | None
 		social_logins: DF.Table[UserSocialLogin]
 		thread_notify: DF.Check
 		time_zone: DF.Autocomplete | None
