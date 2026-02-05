@@ -143,18 +143,18 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 	employee_group_list() {
 		let me = this;
 		me.dialog.set_value("assign_to_me", 0);
-	
+
 		// Fetch Employee Groups directly
 		frappe.db.get_list("Employee Group", {
-			fields: ["employee_group_name"]  
+			fields: ["employee_group_name"]
 		}).then((response) => {
 			// Create a newline-separated string of options for the MultiSelectPills field
 			let employee_groups = response.map((group) => group.employee_group_name).join("\n");
 			me.dialog.fields_dict.assign_to_employee_group.df.options = employee_groups;
 			me.dialog.refresh_field("assign_to_employee_group");
 		});
-	}	
-	
+	}
+
 	user_group_list() {
 		let me = this;
 		let user_group = me.dialog.get_value("assign_to_user_group");

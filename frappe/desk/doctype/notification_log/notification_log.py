@@ -23,9 +23,10 @@ class NotificationLog(Document):
 		document_name: DF.Data | None
 		document_type: DF.Link | None
 		email_content: DF.TextEditor | None
+		email_header: DF.Data | None
 		for_user: DF.Link | None
 		from_user: DF.Link | None
-		link: DF.Data | None
+		link: DF.SmallText | None
 		push_text: DF.Text | None
 		read: DF.Check
 		subject: DF.Text | None

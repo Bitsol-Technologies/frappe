@@ -56,7 +56,7 @@ def add(args=None, *, ignore_permissions=False):
 		- Employee Groups from the "assign_to_employee_group" field.
 			For each employee group, it creates assignments for all employees
 			listed in the child table "Employee Group Employee".
-		
+
 		args should be a JSON string with keys:
 		- "assign_to": JSON list of individual assignee user IDs.
 		- "assign_to_employee_group": JSON list of Employee Group names.
@@ -79,7 +79,7 @@ def add(args=None, *, ignore_permissions=False):
 	for group in frappe.parse_json(args.get("assign_to_employee_group") or '[]'):
 		if frappe.db.exists("Employee Group", group):
 			# Fetch employees from the child table "Employee Group Table" with proper filters
-			employees = frappe.get_all("Employee Group Table", 
+			employees = frappe.get_all("Employee Group Table",
 				filters={
 					"parent": group,
 					"parentfield": "employee_list",
@@ -126,7 +126,7 @@ def create_assignment(assign_to, args, description, ignore_permissions, users_wi
 				"doctype": "ToDo",
 				"allocated_to": assign_to,
 				"reference_type": args["doctype"],
-				"reference_name": args["name"],
+				"reference_name": str(args["name"]),
 				"description": args.get("description"),
 				"priority": args.get("priority", "Medium"),
 				"status": "Open",

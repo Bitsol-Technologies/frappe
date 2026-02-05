@@ -2359,7 +2359,7 @@
   "currency_fraction": "Halala",
   "currency_fraction_units": 100,
   "currency_name": "Saudi Riyal",
-  "currency_symbol": "\u0631.\u0633",
+  "currency_symbol": "\u20C1",
   "number_format": "#,###.##",
   "timezones": [
    "Asia/Riyadh"
@@ -2987,6 +2987,19 @@
    "Africa/Lusaka"
   ],
   "isd": "+260"
+ },
+ "Kosovo": {
+  "code": "xk",
+  "currency": "EUR",
+  "currency_fraction": "Cent",
+  "currency_fraction_units": 100,
+  "currency_name": "Euro",
+  "currency_symbol": "€",
+  "number_format": "#,###.##",
+  "timezones": [
+    "Europe/Belgrade"
+  ],
+  "isd": "+383"
  },
  "Zimbabwe": {
   "code": "zw",
