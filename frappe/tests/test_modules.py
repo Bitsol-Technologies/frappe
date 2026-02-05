@@ -1,15 +1,18 @@
 import os
 import shutil
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
 
 import frappe
 from frappe import scrub
 from frappe.core.doctype.doctype.test_doctype import new_doctype
 from frappe.custom.doctype.custom_field.custom_field import create_custom_field
+from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 from frappe.model.meta import trim_table
 from frappe.modules import export_customizations, export_module_json, get_module_path
 from frappe.modules.utils import export_doc, sync_customizations
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase
 from frappe.utils import now_datetime
 
 
@@ -28,58 +31,18 @@ def delete_path(path):
 		shutil.rmtree(path, ignore_errors=True)
 
 
-class TestUtils(FrappeTestCase):
+class TestUtils(IntegrationTestCase):
 	def setUp(self):
 		self._dev_mode = frappe.local.conf.developer_mode
-		self._in_import = frappe.local.flags.in_import
-
 		frappe.local.conf.developer_mode = True
 
-		if self._testMethodName == "test_export_module_json_no_export":
-			frappe.local.flags.in_import = True
-
-		if self._testMethodName in ("test_export_customizations", "test_sync_customizations"):
-			df = {
-				"fieldname": "test_export_customizations_field",
-				"label": "Custom Data Field",
-				"fieldtype": "Data",
-			}
-			self.custom_field = create_custom_field("Note", df=df)
-
-		if self._testMethodName == "test_export_doc":
-			self.note = frappe.new_doc("Note")
-			self.note.title = frappe.generate_hash(length=10)
-			self.note.save()
-
-		if self._testMethodName == "test_make_boilerplate":
-			self.doctype = new_doctype("Test DocType Boilerplate")
-			self.doctype.insert()
-
 	def tearDown(self):
+		frappe.db.rollback()
 		frappe.local.conf.developer_mode = self._dev_mode
-		frappe.local.flags.in_import = self._in_import
-
-		if self._testMethodName in ("test_export_customizations", "test_sync_customizations"):
-			self.custom_field.delete()
-			trim_table("Note", dry_run=False)
-			delattr(self, "custom_field")
-			delete_path(frappe.get_module_path("Desk", "Note"))
-
-		if self._testMethodName == "test_export_doc":
-			self.note.delete()
-			delattr(self, "note")
-
-		if self._testMethodName == "test_make_boilerplate":
-			self.doctype.delete(force=True)
-			scrubbed = frappe.scrub(self.doctype.name)
-			self.addCleanup(
-				delete_path,
-				path=frappe.get_app_path("frappe", "core", "doctype", scrubbed),
-			)
-			frappe.db.sql_ddl("DROP TABLE `tabTest DocType Boilerplate`")
-			delattr(self, "doctype")
+		frappe.local.flags.pop("in_import", None)
 
 	def test_export_module_json_no_export(self):
+		frappe.local.flags.in_import = True
 		doc = frappe.get_last_doc("DocType")
 		self.assertIsNone(export_module_json(doc=doc, is_standard=True, module=doc.module))
 
@@ -115,36 +78,89 @@ class TestUtils(FrappeTestCase):
 		os.access(frappe.get_app_path("frappe"), os.W_OK), "Only run if frappe app paths is writable"
 	)
 	def test_export_customizations(self):
-		file_path = export_customizations(module="Custom", doctype="Note")
-		self.addCleanup(delete_file, path=file_path)
-		self.assertTrue(file_path.endswith("/custom/custom/note.json"))
-		self.assertTrue(os.path.exists(file_path))
+		with note_customizations():
+			file_path = export_customizations(module="Custom", doctype="Note")
+			self.addCleanup(delete_file, path=file_path)
+			self.assertTrue(file_path.endswith("/custom/custom/note.json"))
+			self.assertTrue(os.path.exists(file_path))
+
+	@unittest.skipUnless(
+		os.access(frappe.get_app_path("frappe"), os.W_OK), "Only run if frappe app paths is writable"
+	)
+	def test_export_customizations_with_module_filter(self):
+		# create two customizations, one matching the module, one under a different module
+		with note_customizations() as (custom_field, property_setter, _doctype_link):
+			custom_field.db_set("module", "Custom")
+			property_setter.db_set("module", "Custom")
+
+			# create module def called OtherModule
+			other_module = frappe.new_doc("Module Def")
+
+			other_module.update({"module_name": "OtherModule", "app_name": "frappe"})
+			other_module.save(ignore_permissions=True)
+			self.addCleanup(other_module.delete)
+
+			# create a customization belonging to another module (should be excluded)
+			other_cf = create_custom_field(
+				"Note",
+				df={
+					"fieldname": "other_mod_field",
+					"label": "Other Mod Field",
+					"fieldtype": "Data",
+					"module": "OtherModule",
+				},
+			)
+
+			self.addCleanup(other_cf.delete)
+
+			file_path = export_customizations(
+				module="Custom",
+				doctype="Note",
+				apply_module_export_filter=True,
+			)
+			self.addCleanup(delete_file, path=file_path)
+
+			self.assertTrue(os.path.exists(file_path))
+
+			with open(file_path) as f:
+				exported = frappe.parse_json(f.read())
+
+			exported_fields = {f["fieldname"] for f in exported.get("custom_fields", [])}
+
+			self.assertIn("test_export_customizations_field", exported_fields)
+
+			self.assertNotIn("other_mod_field", exported_fields)
 
 	@unittest.skipUnless(
 		os.access(frappe.get_app_path("frappe"), os.W_OK), "Only run if frappe app paths is writable"
 	)
 	def test_sync_customizations(self):
-		custom_field = frappe.get_doc(
-			"Custom Field", {"dt": "Note", "fieldname": "test_export_customizations_field"}
-		)
+		with note_customizations() as (custom_field, property_setter, doctype_link):
+			file_path = export_customizations(module="Custom", doctype="Note", sync_on_migrate=True)
+			custom_field.db_set("modified", now_datetime())
+			custom_field.reload()
 
-		file_path = export_customizations(module="Custom", doctype="Note", sync_on_migrate=True)
-		custom_field.db_set("modified", now_datetime())
-		custom_field.reload()
+			# Untracked property setter
+			custom_prop_setter = make_property_setter(
+				"Note", fieldname="content", property="bold", value="1", property_type="Check"
+			)
 
-		self.assertTrue(file_path.endswith("/custom/custom/note.json"))
-		self.assertTrue(os.path.exists(file_path))
-		last_modified_before = custom_field.modified
+			self.assertTrue(file_path.endswith("/custom/custom/note.json"))
+			self.assertTrue(os.path.exists(file_path))
+			last_modified_before = custom_field.modified
 
-		sync_customizations(app="frappe")
+			sync_customizations(app="frappe")
+			self.assertTrue(property_setter.doctype, property_setter.name)
+			self.assertTrue(custom_prop_setter.doctype, custom_prop_setter.name)
+			self.assertTrue(doctype_link.doctype, doctype_link.name)
 
-		self.assertTrue(file_path.endswith("/custom/custom/note.json"))
-		self.assertTrue(os.path.exists(file_path))
-		custom_field.reload()
-		last_modified_after = custom_field.modified
+			self.assertTrue(file_path.endswith("/custom/custom/note.json"))
+			self.assertTrue(os.path.exists(file_path))
+			custom_field.reload()
+			last_modified_after = custom_field.modified
 
-		self.assertNotEqual(last_modified_after, last_modified_before)
-		self.addCleanup(delete_file, path=file_path)
+			self.assertNotEqual(last_modified_after, last_modified_before)
+			self.addCleanup(delete_file, path=file_path)
 
 	def test_reload_doc(self):
 		frappe.db.set_value("DocType", "Note", "migration_hash", "", update_modified=False)
@@ -171,24 +187,69 @@ class TestUtils(FrappeTestCase):
 		os.access(frappe.get_app_path("frappe"), os.W_OK), "Only run if frappe app paths is writable"
 	)
 	def test_export_doc(self):
-		exported_doc_path = frappe.get_app_path(
-			"frappe", "desk", "note", self.note.name, f"{self.note.name}.json"
+		note = frappe.new_doc("Note")
+		note.title = frappe.generate_hash(length=10)
+		note.save()
+		export_doc(doctype="Note", name=note.name)
+		exported_doc_path = Path(
+			frappe.get_app_path("frappe", "desk", "note", note.name, f"{note.name}.json")
 		)
-		folder_path = os.path.abspath(os.path.dirname(exported_doc_path))
-		export_doc(doctype="Note", name=self.note.name)
-		self.addCleanup(delete_path, path=folder_path)
 		self.assertTrue(os.path.exists(exported_doc_path))
+		self.addCleanup(delete_path, path=exported_doc_path.parent.parent)
 
 	@unittest.skipUnless(
 		os.access(frappe.get_app_path("frappe"), os.W_OK), "Only run if frappe app paths is writable"
 	)
 	def test_make_boilerplate(self):
-		scrubbed = frappe.scrub(self.doctype.name)
-		self.assertFalse(
-			os.path.exists(frappe.get_app_path("frappe", "core", "doctype", scrubbed, f"{scrubbed}.json"))
+		with temp_doctype() as doctype:
+			scrubbed = frappe.scrub(doctype.name)
+			path = frappe.get_app_path("frappe", "core", "doctype", scrubbed, f"{scrubbed}.json")
+			self.assertFalse(os.path.exists(path))
+			doctype.custom = False
+			doctype.save()
+			self.assertTrue(os.path.exists(path))
+
+
+@contextmanager
+def temp_doctype():
+	try:
+		doctype = new_doctype().insert()
+		yield doctype
+	finally:
+		doctype.delete(force=True)
+		frappe.db.sql_ddl(f"DROP TABLE `tab{doctype.name}`")
+
+
+@contextmanager
+def note_customizations():
+	try:
+		df = {
+			"fieldname": "test_export_customizations_field",
+			"label": "Custom Data Field",
+			"fieldtype": "Data",
+		}
+		custom_field = create_custom_field("Note", df=df)
+
+		property_setter = make_property_setter(
+			"Note", fieldname="content", property="bold", value="1", property_type="Check"
 		)
-		self.doctype.custom = False
-		self.doctype.save()
-		self.assertTrue(
-			os.path.exists(frappe.get_app_path("frappe", "core", "doctype", scrubbed, f"{scrubbed}.json"))
-		)
+
+		doctype_link = frappe.get_doc(
+			{
+				"doctype": "DocType Link",
+				"parent": "Note",
+				"parenttype": "DocType",
+				"parentfield": "links",
+				"link_doctype": "User",
+				"link_fieldname": "owner",
+				"group": "Test Group",
+			}
+		).insert()
+
+		yield custom_field, property_setter, doctype_link
+	finally:
+		custom_field.delete()
+		property_setter.delete()
+		doctype_link.delete()
+		trim_table("Note", dry_run=False)
+		delete_path(frappe.get_module_path("Desk", "Note"))

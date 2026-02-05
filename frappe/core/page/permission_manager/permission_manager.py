@@ -9,9 +9,11 @@ from frappe.core.doctype.doctype.doctype import (
 	clear_permissions_cache,
 	validate_permissions_for_doctype,
 )
+from frappe.core.doctype.permission_type.permission_type import get_doctype_ptype_map
 from frappe.exceptions import DoesNotExistError
 from frappe.modules.import_file import get_file_path, read_doc_from_file
 from frappe.permissions import (
+	AUTOMATIC_ROLES,
 	add_permission,
 	get_all_perms,
 	get_linked_doctypes,
@@ -21,7 +23,7 @@ from frappe.permissions import (
 )
 from frappe.utils.user import get_users_with_role as _get_user_with_role
 
-not_allowed_in_permission_manager = ["DocType", "Patch Log", "Module Def", "Transaction Log"]
+not_allowed_in_permission_manager = ["DocType", "Patch Log", "Module Def"]
 
 
 @frappe.whitelist()
@@ -30,30 +32,38 @@ def get_roles_and_doctypes():
 
 	active_domains = frappe.get_active_domains()
 
-	doctypes = frappe.get_all(
-		"DocType",
-		filters={
-			"istable": 0,
-			"name": ("not in", ",".join(not_allowed_in_permission_manager)),
-		},
-		or_filters={"ifnull(restrict_to_domain, '')": "", "restrict_to_domain": ("in", active_domains)},
-		fields=["name"],
+	DocType = frappe.qb.DocType("DocType")
+	doctype_domain_condition = (DocType.restrict_to_domain.isnull()) | (DocType.restrict_to_domain == "")
+	if active_domains:
+		doctype_domain_condition = doctype_domain_condition | DocType.restrict_to_domain.isin(active_domains)
+
+	doctypes = (
+		frappe.qb.from_(DocType)
+		.select(DocType.name)
+		.where(
+			(DocType.istable == 0)
+			& (DocType.name.notin(not_allowed_in_permission_manager))
+			& doctype_domain_condition
+		)
+		.run(as_dict=True)
 	)
 
 	restricted_roles = ["Administrator"]
 	if frappe.session.user != "Administrator":
 		custom_user_type_roles = frappe.get_all("User Type", filters={"is_standard": 0}, fields=["role"])
 		restricted_roles.extend(row.role for row in custom_user_type_roles)
-		restricted_roles.append("All")
+		restricted_roles.extend(AUTOMATIC_ROLES)
 
-	roles = frappe.get_all(
-		"Role",
-		filters={
-			"name": ("not in", restricted_roles),
-			"disabled": 0,
-		},
-		or_filters={"ifnull(restrict_to_domain, '')": "", "restrict_to_domain": ("in", active_domains)},
-		fields=["name"],
+	Role = frappe.qb.DocType("Role")
+	role_domain_condition = (Role.restrict_to_domain.isnull()) | (Role.restrict_to_domain == "")
+	if active_domains:
+		role_domain_condition = role_domain_condition | Role.restrict_to_domain.isin(active_domains)
+
+	roles = (
+		frappe.qb.from_(Role)
+		.select(Role.name)
+		.where((Role.name.notin(restricted_roles)) & (Role.disabled == 0) & role_domain_condition)
+		.run(as_dict=True)
 	)
 
 	doctypes_list = [{"label": _(d.get("name")), "value": d.get("name")} for d in doctypes]
@@ -62,6 +72,7 @@ def get_roles_and_doctypes():
 	return {
 		"doctypes": sorted(doctypes_list, key=lambda d: d["label"].casefold()),
 		"roles": sorted(roles_list, key=lambda d: d["label"].casefold()),
+		"doctype_ptype_map": get_doctype_ptype_map(),
 	}
 
 
@@ -108,8 +119,8 @@ def add(parent, role, permlevel):
 
 
 @frappe.whitelist()
-def update(doctype, role, permlevel, ptype, value=None):
-	"""Update role permission params
+def update(doctype: str, role: str, permlevel: int, ptype: str, value=None, if_owner=0) -> str | None:
+	"""Update role permission params.
 
 	Args:
 	        doctype (str): Name of the DocType to update params for
@@ -118,15 +129,22 @@ def update(doctype, role, permlevel, ptype, value=None):
 	        ptype (str): permission type, example "read", "delete", etc.
 	        value (None, optional): value for ptype, None indicates False
 
-	Returns:
-	        str: Refresh flag is permission is updated successfully
+	Return:
+	        str: Refresh flag if permission is updated successfully
 	"""
 
 	def clear_cache():
 		frappe.clear_cache(doctype=doctype)
 
 	frappe.only_for("System Manager")
-	out = update_permission_property(doctype, role, permlevel, ptype, value)
+
+	if ptype == "report" and value == "1" and if_owner == "1":
+		frappe.throw(_("Cannot set 'Report' permission if 'Only If Creator' permission is set"))
+
+	out = update_permission_property(doctype, role, permlevel, ptype, value, if_owner=if_owner)
+
+	if ptype == "if_owner" and value == "1":
+		update_permission_property(doctype, role, permlevel, "report", "0", if_owner=value)
 
 	frappe.db.after_commit.add(clear_cache)
 
@@ -134,11 +152,15 @@ def update(doctype, role, permlevel, ptype, value=None):
 
 
 @frappe.whitelist()
-def remove(doctype, role, permlevel):
+def remove(doctype, role, permlevel, if_owner=0):
 	frappe.only_for("System Manager")
 	setup_custom_perms(doctype)
 
-	frappe.db.delete("Custom DocPerm", {"parent": doctype, "role": role, "permlevel": permlevel})
+	custom_docperms = frappe.db.get_values(
+		"Custom DocPerm", {"parent": doctype, "role": role, "permlevel": permlevel, "if_owner": if_owner}
+	)
+	for name in custom_docperms:
+		frappe.delete_doc("Custom DocPerm", name, ignore_permissions=True, force=True)
 
 	if not frappe.get_all("Custom DocPerm", {"parent": doctype}):
 		frappe.throw(_("There must be atleast one permission rule."), title=_("Cannot Remove"))

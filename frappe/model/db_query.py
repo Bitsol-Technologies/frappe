@@ -3,10 +3,16 @@
 """build query for doclistview and return results"""
 
 import copy
+import datetime
 import json
 import re
 from collections import Counter
-from datetime import datetime
+from collections.abc import Mapping, Sequence
+from functools import cached_property, lru_cache
+
+import sqlparse
+from sqlparse import tokens
+from sqlparse.sql import Function, Parenthesis, Statement
 
 import frappe
 import frappe.defaults
@@ -15,46 +21,54 @@ import frappe.share
 from frappe import _
 from frappe.core.doctype.server_script.server_script_utils import get_server_script_map
 from frappe.database.utils import DefaultOrderBy, FallBackDateTimeStr, NestedSetHierarchy
-from frappe.model import get_permitted_fields, optional_fields
+from frappe.model import OPTIONAL_FIELDS, get_permitted_fields
 from frappe.model.meta import get_table_columns
 from frappe.model.utils import is_virtual_doctype
+from frappe.model.utils.mask import mask_field_value
 from frappe.model.utils.user_settings import get_user_settings, update_user_settings
 from frappe.query_builder.utils import Column
+from frappe.types import Filters, FilterSignature, FilterTuple
 from frappe.utils import (
-	add_to_date,
 	cint,
 	cstr,
 	flt,
 	get_filter,
 	get_time,
 	get_timespan_date_range,
-	make_filter_tuple,
 )
-from frappe.utils.data import sbool
+from frappe.utils.data import DateTimeLikeObject, get_datetime, getdate, sbool
+
+
+@lru_cache(maxsize=128)
+def _parse_sql(field: str) -> Statement | None:
+	"""
+	Parse a given SQL statement using `sqlparse`.
+
+	Args:
+		field (str): The SQL statement string to parse.
+
+	Returns:
+		Statement | None: A `sqlparse.sql.Statement` object if parsing succeeds, otherwise `None`.
+	"""
+	if parsed := sqlparse.parse(field):
+		return parsed[0]
+
 
 LOCATE_PATTERN = re.compile(r"locate\([^,]+,\s*[`\"]?name[`\"]?\s*\)", flags=re.IGNORECASE)
-LOCATE_CAST_PATTERN = re.compile(
-	r"locate\(([^,]+),\s*([`\"]?name[`\"]?)\s*\)", flags=re.IGNORECASE
-)
-FUNC_IFNULL_PATTERN = re.compile(
-	r"(strpos|ifnull|coalesce)\(\s*[`\"]?name[`\"]?\s*,", flags=re.IGNORECASE
-)
-CAST_VARCHAR_PATTERN = re.compile(
-	r"([`\"]?tab[\w`\" -]+\.[`\"]?name[`\"]?)(?!\w)", flags=re.IGNORECASE
-)
+LOCATE_CAST_PATTERN = re.compile(r"locate\(([^,]+),\s*([`\"]?name[`\"]?)\s*\)", flags=re.IGNORECASE)
+FUNC_IFNULL_PATTERN = re.compile(r"(strpos|ifnull|coalesce)\(\s*[`\"]?name[`\"]?\s*,", flags=re.IGNORECASE)
+CAST_VARCHAR_PATTERN = re.compile(r"([`\"]?tab[\w`\" -]+\.[`\"]?name[`\"]?)(?!\w)", flags=re.IGNORECASE)
 ORDER_BY_PATTERN = re.compile(r"\ order\ by\ |\ asc|\ ASC|\ desc|\ DESC", flags=re.IGNORECASE)
-SUB_QUERY_PATTERN = re.compile("^.*[,();@].*")
+SUB_QUERY_PATTERN = re.compile("^.*[,();@].*", flags=re.DOTALL)
 IS_QUERY_PATTERN = re.compile(r"^(select|delete|update|drop|create)\s")
-IS_QUERY_PREDICATE_PATTERN = re.compile(
-	r"\s*[0-9a-zA-z]*\s*( from | group by | order by | where | join )"
-)
+IS_QUERY_PREDICATE_PATTERN = re.compile(r"\s*[0-9a-zA-z]*\s*( from | group by | order by | where | join )")
 FIELD_QUOTE_PATTERN = re.compile(r"[0-9a-zA-Z]+\s*'")
-FIELD_COMMA_PATTERN = re.compile(r"[0-9a-zA-Z]+\s*,")
+FIELD_COMMA_PATTERN = re.compile(r"[0-9a-zA-Z_]+\s*,")
 STRICT_FIELD_PATTERN = re.compile(r".*/\*.*")
 STRICT_UNION_PATTERN = re.compile(r".*\s(union).*\s")
 ORDER_GROUP_PATTERN = re.compile(r".*[^a-z0-9-_ ,`'\"\.\(\)].*")
-FN_PARAMS_PATTERN = re.compile(r".*?\((.*)\).*")
 SPECIAL_FIELD_CHARS = frozenset(("(", "`", ".", "'", '"', "*"))
+# XXX: These are just matching brackets to not confuse code formatters: ))
 
 
 class DatabaseQuery:
@@ -74,12 +88,16 @@ class DatabaseQuery:
 		self.permission_map = {}
 		self.shared = []
 		self._fetch_shared_documents = False
+		self._metas = {}
 
-	@property
+	@cached_property
 	def doctype_meta(self):
-		if not hasattr(self, "_doctype_meta"):
-			self._doctype_meta = frappe.get_meta(self.doctype)
-		return self._doctype_meta
+		return self.get_meta(self.doctype)
+
+	def get_meta(self, doctype: str):
+		if doctype not in self._metas:
+			self._metas[doctype] = frappe.get_meta(doctype)
+		return self._metas[doctype]
 
 	@property
 	def query_tables(self):
@@ -88,8 +106,8 @@ class DatabaseQuery:
 	def execute(
 		self,
 		fields=None,
-		filters=None,
-		or_filters=None,
+		filters: FilterSignature | str | None = None,
+		or_filters: FilterSignature | None = None,
 		docstatus=None,
 		group_by=None,
 		order_by=DefaultOrderBy,
@@ -110,7 +128,6 @@ class DatabaseQuery:
 		save_user_settings=False,
 		save_user_settings_fields=False,
 		update=None,
-		add_total_row=None,
 		user_settings=None,
 		reference_doctype=None,
 		run=True,
@@ -120,15 +137,14 @@ class DatabaseQuery:
 		*,
 		parent_doctype=None,
 	) -> list:
+		self.user = user or frappe.session.user
 
 		if not ignore_permissions:
 			self.check_read_permission(self.doctype, parent_doctype=parent_doctype)
 
 		# filters and fields swappable
 		# its hard to remember what comes first
-		if isinstance(fields, dict) or (
-			fields and isinstance(fields, list) and isinstance(fields[0], list)
-		):
+		if isinstance(fields, dict) or (fields and isinstance(fields, list) and isinstance(fields[0], list)):
 			# if fields is given as dict/list of list, its probably filters
 			filters, fields = fields, filters
 
@@ -147,9 +163,21 @@ class DatabaseQuery:
 			limit_page_length = page_length
 		if limit:
 			limit_page_length = limit
+		if as_list and not isinstance(self.fields, (Sequence | str)) and len(self.fields) > 1:
+			frappe.throw(_("Fields must be a list or tuple when as_list is enabled"))
 
-		self.filters = filters or []
-		self.or_filters = or_filters or []
+		self.filters: Filters
+		self.or_filters: Filters
+		for k, _filters in {
+			"filters": filters or Filters(),
+			"or_filters": or_filters or Filters(),
+		}.items():
+			if isinstance(_filters, str):
+				_filters = json.loads(_filters)
+			if not isinstance(_filters, Filters):
+				_filters = Filters(_filters, doctype=self.doctype)
+			setattr(self, k, _filters)
+
 		self.docstatus = docstatus or []
 		self.group_by = group_by
 		self.order_by = order_by
@@ -162,7 +190,6 @@ class DatabaseQuery:
 		self.as_list = as_list
 		self.ignore_ifnull = ignore_ifnull
 		self.flags.ignore_permissions = ignore_permissions
-		self.user = user or frappe.session.user
 		self.update = update
 		self.user_settings_fields = copy.deepcopy(self.fields)
 		self.run = run
@@ -181,6 +208,9 @@ class DatabaseQuery:
 			from frappe.model.base_document import get_controller
 
 			controller = get_controller(self.doctype)
+			if not hasattr(controller, "get_list"):
+				return []
+
 			self.parse_args()
 			kwargs = {
 				"as_list": as_list,
@@ -190,7 +220,7 @@ class DatabaseQuery:
 				"pluck": pluck,
 				"parent_doctype": parent_doctype,
 			} | self.__dict__
-			return controller.get_list(kwargs)
+			return frappe.call(controller.get_list, args=kwargs, **kwargs)
 
 		self.columns = self.get_table_columns()
 
@@ -210,33 +240,71 @@ class DatabaseQuery:
 		if pluck:
 			return [d[pluck] for d in result]
 
+		if self.doctype and result:
+			result = self.mask_fields(result)
+
 		return result
+
+	def mask_fields(self, result):
+		"""Mask fields in the result based on the doctype's masked fields"""
+		from frappe.model.utils.mask import mask_dict_results, mask_list_results
+
+		masked_fields = self.get_masked_fields()
+
+		if not masked_fields:
+			return result
+
+		if self.as_list:
+			field_index_map = {}
+			for idx, field in enumerate(self.fields):
+				# handle aliases (e.g. `tabSI`.`posting_date` as posting_date)
+				if " as " in field.lower():
+					alias = field.split(" as ")[1].strip(" '")
+					field_index_map[alias] = idx
+				else:
+					# extract last part after `.`
+					col = field.split(".")[-1].strip("`")
+					field_index_map[col] = idx
+
+			return mask_list_results(result, masked_fields, field_index_map)
+		else:
+			return mask_dict_results(result, masked_fields)
+
+	def get_masked_fields(self):
+		"""Get masked fields for the doctype"""
+
+		meta = self.get_meta(self.doctype)
+
+		return meta.get_masked_fields()
 
 	def build_and_run(self):
 		args = self.prepare_args()
 		args.limit = self.add_limit()
+
+		if not args.fields:
+			# apply_fieldlevel_read_permissions has likely removed ALL the fields that user asked for
+			return []
 
 		if args.conditions:
 			args.conditions = "where " + args.conditions
 
 		if self.distinct:
 			args.fields = "distinct " + args.fields
-			args.order_by = ""  # TODO: recheck for alternative
+			if frappe.db.db_type == "postgres":
+				# PostgreSQL requires ORDER BY expressions to appear in SELECT list when using DISTINCT
+				args.order_by = ""
 
 		# Postgres requires any field that appears in the select clause to also
 		# appear in the order by and group by clause
 		if frappe.db.db_type == "postgres" and args.order_by and args.group_by:
 			args = self.prepare_select_args(args)
 
-		query = (
-			"""select %(fields)s
-			from %(tables)s
-			%(conditions)s
-			%(group_by)s
-			%(order_by)s
-			%(limit)s"""
-			% args
-		)
+		query = """select {fields}
+from {tables}
+{conditions}
+{group_by}
+{order_by}
+{limit}""".format(**args)
 
 		return frappe.db.sql(
 			query,
@@ -313,10 +381,10 @@ class DatabaseQuery:
 		self.set_order_by(args)
 
 		self.validate_order_by_and_group_by(args.order_by)
-		args.order_by = args.order_by and (" order by " + args.order_by) or ""
+		args.order_by = (args.order_by and (" order by " + args.order_by)) or ""
 
 		self.validate_order_by_and_group_by(self.group_by)
-		args.group_by = self.group_by and (" group by " + self.group_by) or ""
+		args.group_by = (self.group_by and (" group by " + self.group_by)) or ""
 
 		return args
 
@@ -334,7 +402,7 @@ class DatabaseQuery:
 		return args
 
 	def parse_args(self):
-		"""Convert fields and filters from strings to list, dicts"""
+		"""Convert fields and filters from strings to list, dicts."""
 		if isinstance(self.fields, str):
 			if self.fields == "*":
 				self.fields = ["*"]
@@ -355,7 +423,7 @@ class DatabaseQuery:
 				if " as " in field:
 					field, alias = field.split(" as ", 1)
 				linked_fieldname, fieldname = field.split(".", 1)
-				linked_field = frappe.get_meta(self.doctype).get_field(linked_fieldname)
+				linked_field = self.get_meta(self.doctype).get_field(linked_fieldname)
 				# this is not a link field
 				if not linked_field:
 					continue
@@ -368,16 +436,6 @@ class DatabaseQuery:
 				if alias:
 					field = f"{field} as {alias}"
 				self.fields[self.fields.index(original_field)] = field
-
-		for filter_name in ["filters", "or_filters"]:
-			filters = getattr(self, filter_name)
-			if isinstance(filters, str):
-				filters = json.loads(filters)
-
-			if isinstance(filters, dict):
-				fdict = filters
-				filters = [make_filter_tuple(self.doctype, key, value) for key, value in fdict.items()]
-			setattr(self, filter_name, filters)
 
 	def sanitize_fields(self):
 		"""
@@ -394,8 +452,6 @@ class DatabaseQuery:
 			"concat",
 			"concat_ws",
 			"if",
-			"ifnull",
-			"nullif",
 			"coalesce",
 			"connection_id",
 			"current_user",
@@ -406,7 +462,48 @@ class DatabaseQuery:
 			"user",
 			"version",
 			"global",
+			"sleep",
 		]
+
+		def _find_subqueries(parsed: Statement) -> list:
+			"""
+			Recursively find all subqueries in a parsed SQL statement.
+			"""
+			subqueries = []
+
+			for token in parsed.tokens:
+				if isinstance(token, Parenthesis):
+					# Check for DML token for subquery check
+					is_subquery = False
+					for sub_token in token.tokens:
+						if sub_token.ttype is tokens.DML:
+							is_subquery = True
+							break
+					if is_subquery:
+						subqueries.append(token)
+					# Recursively check for nested subqueries
+					subqueries.extend(_find_subqueries(token))
+				elif token.is_group:
+					subqueries.extend(_find_subqueries(token))
+
+			return subqueries
+
+		def _check_sql_token(statement: Statement) -> None:
+			"""
+			Checks the output of `sqlparse.parse()` to detect blocked functions and subqueries.
+			"""
+			if _find_subqueries(statement):
+				_raise_exception()
+
+			for token in statement.tokens:
+				if isinstance(token, Function):
+					if (name := (token.get_name())) and name.lower() in blacklisted_functions:
+						_raise_exception()
+				if token.ttype == tokens.Keyword:
+					if token.value.lower() in blacklisted_keywords:
+						_raise_exception()
+				if token.is_group:
+					_check_sql_token(token)
 
 		def _raise_exception():
 			frappe.throw(_("Use of sub-query or function is restricted"), frappe.DataError)
@@ -422,16 +519,8 @@ class DatabaseQuery:
 			lower_field = field.lower().strip()
 
 			if SUB_QUERY_PATTERN.match(field):
-				if lower_field[0] == "(":
-					subquery_token = lower_field[1:].lstrip().split(" ", 1)[0]
-					if subquery_token in blacklisted_keywords:
-						_raise_exception()
-
-				function = lower_field.split("(", 1)[0].rstrip()
-				if function in blacklisted_functions:
-					frappe.throw(
-						_("Use of function {0} in field is restricted").format(function), exc=frappe.DataError
-					)
+				# Check all tokens for subquery detection
+				_check_sql_token(_parse_sql(field))
 
 				if "@" in lower_field:
 					# prevent access to global variables
@@ -467,7 +556,7 @@ class DatabaseQuery:
 		# add tables from fields
 		if self.fields:
 			for field in self.fields:
-				if not ("tab" in field and "." in field) or any(x for x in sql_functions if x in field):
+				if "tab" not in field or "." not in field or any(x for x in sql_functions if x in field):
 					continue
 
 				table_name = field.split(".", 1)[0]
@@ -480,10 +569,13 @@ class DatabaseQuery:
 
 				if table_name.lower().startswith("group_concat("):
 					table_name = table_name[13:]
-				if not table_name[0] == "`":
+				if table_name.lower().startswith("distinct"):
+					table_name = table_name[8:].strip()
+				if table_name[0] != "`":
 					table_name = f"`{table_name}`"
 				if (
-					table_name not in self.query_tables and table_name not in self.linked_table_aliases.values()
+					table_name not in self.query_tables
+					and table_name not in self.linked_table_aliases.values()
 				):
 					self.append_table(table_name)
 
@@ -520,14 +612,13 @@ class DatabaseQuery:
 
 	def _set_permission_map(self, doctype: str, parent_doctype: str | None = None):
 		ptype = "select" if frappe.only_has_select_perm(doctype) else "read"
-		val = frappe.has_permission(
+		frappe.has_permission(
 			doctype,
 			ptype=ptype,
 			parent_doctype=parent_doctype or self.doctype,
+			throw=True,
+			user=self.user,
 		)
-		if not val:
-			frappe.flags.error_message = _("Insufficient Permission for {0}").format(frappe.bold(doctype))
-			raise frappe.PermissionError(doctype)
 		self.permission_map[doctype] = ptype
 
 	def set_field_tables(self):
@@ -559,27 +650,11 @@ class DatabaseQuery:
 
 	def set_optional_columns(self):
 		"""Removes optional columns like `_user_tags`, `_comments` etc. if not in table"""
-		# remove from fields
-		to_remove = []
-		for fld in self.fields:
-			to_remove.extend(fld for f in optional_fields if f in fld and f not in self.columns)
-		for fld in to_remove:
-			del self.fields[self.fields.index(fld)]
 
-		# remove from filters
-		to_remove = []
-		for each in self.filters:
-			if isinstance(each, str):
-				each = [each]
-
-			to_remove.extend(
-				each for element in each if element in optional_fields and element not in self.columns
-			)
-		for each in to_remove:
-			if isinstance(self.filters, dict):
-				del self.filters[each]
-			else:
-				self.filters.remove(each)
+		self.fields[:] = [f for f in self.fields if f not in OPTIONAL_FIELDS or f in self.columns]
+		self.filters[:] = [
+			f for f in self.filters if f.fieldname not in OPTIONAL_FIELDS or f.fieldname in self.columns
+		]
 
 	def build_conditions(self):
 		self.conditions = []
@@ -593,19 +668,13 @@ class DatabaseQuery:
 			if match_conditions:
 				self.conditions.append(f"({match_conditions})")
 
-	def build_filter_conditions(self, filters, conditions: list, ignore_permissions=None):
+	def build_filter_conditions(self, filters: Filters, conditions: list, ignore_permissions=None):
 		"""build conditions from user filters"""
 		if ignore_permissions is not None:
 			self.flags.ignore_permissions = ignore_permissions
 
-		if isinstance(filters, dict):
-			filters = [filters]
-
 		for f in filters:
-			if isinstance(f, str):
-				conditions.append(f)
-			else:
-				conditions.append(self.prepare_filter_condition(f))
+			conditions.append(self.prepare_filter_condition(f))
 
 	def remove_field(self, idx: int):
 		if self.as_list:
@@ -626,95 +695,96 @@ class DatabaseQuery:
 		        - Query: fields=["*"]
 		        - Result: fields=["title", ...] // will also include Frappe's meta field like `name`, `owner`, etc.
 		"""
+		from frappe.desk.reportview import extract_fieldnames
+
 		if self.flags.ignore_permissions:
 			return
 
-		asterisk_fields = []
-		permitted_fields = get_permitted_fields(
-			doctype=self.doctype,
-			parenttype=self.parent_doctype,
-			permission_type=self.permission_map.get(self.doctype),
+		permitted_fields = set(
+			get_permitted_fields(
+				doctype=self.doctype,
+				parenttype=self.parent_doctype,
+				permission_type=self.permission_map.get(self.doctype),
+				ignore_virtual=True,
+			)
 		)
 
-		for i, field in enumerate(self.fields):
-			if "distinct" in field.lower():
-				# field: 'count(distinct `tabPhoto`.name) as total_count'
-				# column: 'tabPhoto.name'
-				if _fn := FN_PARAMS_PATTERN.findall(field):
-					column = _fn[0].replace("distinct ", "").replace("DISTINCT ", "").replace("`", "")
-				# field: 'distinct name'
-				# column: 'name'
-				else:
-					column = field.split(" ", 2)[1].replace("`", "")
-			else:
-				# field: 'count(`tabPhoto`.name) as total_count'
-				# column: 'tabPhoto.name'
-				column = field.split("(")[-1].split(")", 1)[0]
-				column = strip_alias(column).replace("`", "")
+		permitted_child_table_fields = {}
 
-			if column == "*" and not in_function("*", field):
-				asterisk_fields.append(i)
+		# Create a copy of the fields list and reverse it to avoid index issues when removing fields
+		fields_to_check = list(enumerate(self.fields))[::-1]
+
+		for i, field in fields_to_check:
+			# field: 'count(distinct `tabPhoto`.name) as total_count'
+			# column: 'tabPhoto.name'
+			# field: 'count(`tabPhoto`.name) as total_count'
+			# column: 'tabPhoto.name'
+			columns = extract_fieldnames(field)
+			if not columns:
+				continue
+
+			column = columns[0]
+			# handle * fields
+			if column == "*" and "*" in field:
+				if not in_function("*", field):
+					self.fields[i : i + 1] = permitted_fields
 				continue
 
 			# handle pseudo columns
-			elif not column or column.isnumeric():
+			if not column or column.isnumeric():
 				continue
 
 			# labels / pseudo columns or frappe internals
-			elif column[0] in {"'", '"'} or column in optional_fields:
+			if column[0] in {"'", '"'}:
 				continue
 
-			# handle child / joined table fields
-			elif "." in field:
+			doctype = None
+
+			if "." in column:
 				table, column = column.split(".", 1)
-				ch_doctype = table
+				doctype = self.linked_table_aliases[table] if table in self.linked_table_aliases else table
+				doctype = doctype.replace("`", "").removeprefix("tab")
 
-				if ch_doctype in self.linked_table_aliases:
-					ch_doctype = self.linked_table_aliases[ch_doctype]
+			# handle child / joined table fields
+			if doctype and doctype != self.doctype:
+				if wrap_grave_quotes(table) not in self.query_tables:
+					raise frappe.PermissionError(doctype)
 
-				ch_doctype = ch_doctype.replace("`", "").replace("tab", "", 1)
-
-				if wrap_grave_quotes(table) in self.query_tables:
-					permitted_child_table_fields = get_permitted_fields(
-						doctype=ch_doctype, parenttype=self.doctype
+				if doctype not in permitted_child_table_fields:
+					permitted_child_table_fields[doctype] = set(
+						get_permitted_fields(
+							doctype=doctype,
+							parenttype=self.doctype,
+							ignore_virtual=True,
+						)
 					)
-					if column in permitted_child_table_fields or column in optional_fields:
-						continue
-					else:
-						self.remove_field(i)
-				else:
-					raise frappe.PermissionError(ch_doctype)
 
-			elif column in permitted_fields:
+				if column in permitted_child_table_fields[doctype] or column in OPTIONAL_FIELDS:
+					continue
+
+				self.remove_field(i)
+				continue
+
+			if column in OPTIONAL_FIELDS or column in permitted_fields:
 				continue
 
 			# field inside function calls / * handles things like count(*)
 			elif "(" in field:
 				if "*" in field:
 					continue
-				elif _params := FN_PARAMS_PATTERN.findall(field):
-					params = (x.strip() for x in _params[0].split(","))
-					for param in params:
-						if not (
-							not param or param in permitted_fields or param.isnumeric() or "'" in param or '"' in param
-						):
+				else:
+					for column in columns:
+						if column not in permitted_fields:
 							self.remove_field(i)
 							break
 					continue
-				self.remove_field(i)
-
 			# remove if access not allowed
 			else:
 				self.remove_field(i)
 
-		# handle * fields
-		j = 0
-		for i in asterisk_fields:
-			self.fields[i + j : i + j + 1] = permitted_fields
-			j = j + len(permitted_fields) - 1
+	def prepare_filter_condition(self, ft: FilterTuple) -> str:
+		"""Return a filter condition in the format:
 
-	def prepare_filter_condition(self, f):
-		"""Returns a filter condition in the format:
 		ifnull(`tabDocType`.`fieldname`, fallback) operator "value"
 		"""
 
@@ -723,7 +793,7 @@ class DatabaseQuery:
 		from frappe.boot import get_additional_filters_from_hooks
 
 		additional_filters_config = get_additional_filters_from_hooks()
-		f = get_filter(self.doctype, f, additional_filters_config)
+		f: FilterTuple = get_filter(self.doctype, ft, additional_filters_config)
 
 		tname = "`tab" + f.doctype + "`"
 		if tname not in self.tables:
@@ -734,13 +804,17 @@ class DatabaseQuery:
 		if f.operator.lower() in additional_filters_config:
 			f.update(get_additional_filter_field(additional_filters_config, f, f.value))
 
-		meta = frappe.get_meta(f.doctype)
-		can_be_null = True
+		meta = self.get_meta(f.doctype)
+		df = meta.get("fields", {"fieldname": f.fieldname})
+		df = df[0] if df else None
+
+		# primary key is never nullable, modified is usually indexed by default and always present
+		can_be_null = f.fieldname not in ("name", "modified", "creation")
+
+		value = None
 
 		# prepare in condition
 		if f.operator.lower() in NestedSetHierarchy:
-			values = f.value or ""
-
 			# TODO: handle list and tuple
 			# if not isinstance(values, (list, tuple)):
 			# 	values = values.split(",")
@@ -748,7 +822,7 @@ class DatabaseQuery:
 			ref_doctype = field.options if field else f.doctype
 			lft, rgt = "", ""
 			if f.value:
-				lft, rgt = frappe.db.get_value(ref_doctype, f.value, ["lft", "rgt"])
+				lft, rgt = frappe.db.get_value(ref_doctype, f.value, ["lft", "rgt"]) or (0, 0)
 
 			# Get descendants elements of a DocType with a tree structure
 			if f.operator.lower() in (
@@ -759,7 +833,7 @@ class DatabaseQuery:
 				nodes = frappe.get_all(
 					ref_doctype,
 					filters={"lft": [">", lft], "rgt": ["<", rgt]},
-					order_by="`lft` ASC",
+					order_by="lft ASC",
 					pluck="name",
 				)
 				if f.operator.lower() == "descendants of (inclusive)":
@@ -769,7 +843,7 @@ class DatabaseQuery:
 				nodes = frappe.get_all(
 					ref_doctype,
 					filters={"lft": ["<", lft], "rgt": [">", rgt]},
-					order_by="`lft` DESC",
+					order_by="lft DESC",
 					pluck="name",
 				)
 
@@ -786,74 +860,87 @@ class DatabaseQuery:
 				"not in" if f.operator.lower() in ("not ancestors of", "not descendants of") else "in"
 			)
 
-		elif f.operator.lower() in ("in", "not in"):
+		if f.operator.lower() in ("in", "not in"):
 			# if values contain '' or falsy values then only coalesce column
 			# for `in` query this is only required if values contain '' or values are empty.
 			# for `not in` queries we can't be sure as column values might contain null.
+			can_be_null &= not getattr(df, "not_nullable", False)
 			if f.operator.lower() == "in":
-				can_be_null = not f.value or any(v is None or v == "" for v in f.value)
+				can_be_null &= not f.value or any(v is None or v == "" for v in f.value)
 
-			values = f.value or ""
-			if isinstance(values, str):
-				values = values.split(",")
+			if value is None:
+				values = f.value or ""
+				if isinstance(values, str):
+					values = values.split(",")
 
-			fallback = "''"
-			value = [frappe.db.escape((cstr(v) or "").strip(), percent=False) for v in values]
-			if len(value):
-				value = f"({', '.join(value)})"
-			else:
-				value = "('')"
+				fallback = "''"
+				value = [frappe.db.escape((cstr(v) or "").strip(), percent=False) for v in values]
+				if len(value):
+					value = f"({', '.join(value)})"
+				else:
+					value = "('')"
 
 		else:
 			escape = True
-			df = meta.get("fields", {"fieldname": f.fieldname})
-			df = df[0] if df else None
 
-			if df and df.fieldtype in ("Check", "Float", "Int", "Currency", "Percent"):
+			if df and (
+				df.fieldtype in ("Check", "Float", "Int", "Currency", "Percent")
+				or getattr(df, "not_nullable", False)
+			):
 				can_be_null = False
 
 			if f.operator.lower() in ("previous", "next", "timespan"):
 				date_range = get_date_range(f.operator.lower(), f.value)
-				f.operator = "Between"
+				f.operator = "between"
 				f.value = date_range
 				fallback = f"'{FallBackDateTimeStr}'"
 
+			if f.operator.lower() in (">", ">=") and (
+				f.fieldname in ("creation", "modified")
+				or (df and (df.fieldtype == "Date" or df.fieldtype == "Datetime"))
+			):
+				# Null values can never be greater than any non-null value
+				can_be_null = False
+
 			if f.operator in (">", "<", ">=", "<=") and (f.fieldname in ("creation", "modified")):
 				value = cstr(f.value)
+				can_be_null = False
 				fallback = f"'{FallBackDateTimeStr}'"
 
 			elif f.operator.lower() in ("between") and (
 				f.fieldname in ("creation", "modified")
 				or (df and (df.fieldtype == "Date" or df.fieldtype == "Datetime"))
 			):
-
 				escape = False
+				# Between operator never needs to check for null
+				# Explanation: Consider SQL -> `COLUMN between X and Y`
+				# Actual computation:
+				#     for row in rows:
+				#     if Y > row.COLUMN > X:
+				#         yield row
+
+				# Since Y and X can't be null, null value in column will never match filter, so
+				# coalesce is extra cost that prevents index usage
+				can_be_null = False
+
 				value = get_between_date_filter(f.value, df)
 				fallback = f"'{FallBackDateTimeStr}'"
 
 			elif f.operator.lower() == "is":
+				fallback = "''"
 				if f.value == "set":
 					f.operator = "!="
-					# Value can technically be null, but comparing with null will always be falsy
-					# Not using coalesce here is faster because indexes can be used.
-					# null != '' -> null ~ falsy
-					# '' != '' -> false
 					can_be_null = False
 				elif f.value == "not set":
 					f.operator = "="
-					fallback = "''"
-					can_be_null = True
-
-				value = ""
-
-				if can_be_null and "ifnull" not in column_name.lower():
-					column_name = f"ifnull({column_name}, {fallback})"
+					can_be_null = not getattr(df, "not_nullable", False)
+				f.value = value = ""
 
 			elif df and df.fieldtype == "Date":
 				value = frappe.db.format_date(f.value)
 				fallback = "'0001-01-01'"
 
-			elif (df and df.fieldtype == "Datetime") or isinstance(f.value, datetime):
+			elif (df and df.fieldtype == "Datetime") or isinstance(f.value, datetime.datetime):
 				value = frappe.db.format_datetime(f.value)
 				fallback = f"'{FallBackDateTimeStr}'"
 
@@ -872,14 +959,20 @@ class DatabaseQuery:
 					# because "like" uses backslash (\) for escaping
 					value = value.replace("\\", "\\\\").replace("%", "%%")
 
-			elif (
-				f.operator == "=" and df and df.fieldtype in ["Link", "Data"]
-			):  # TODO: Refactor if possible
-				value = f.value or "''"
+			elif f.operator == "=" and df and df.fieldtype in ("Link", "Data", "Dynamic Link"):
+				value = cstr(f.value)
 				fallback = "''"
 
 			elif f.fieldname == "name":
-				value = f.value or "''"
+				value = f.value if f.value is not None else ""
+				fallback = "''"
+
+			elif (
+				df
+				and (db_type := cstr(frappe.db.type_map.get(df.fieldtype, " ")[0]))
+				and db_type in ("varchar", "text", "longtext", "smalltext", "json")
+			) or f.fieldname in ("owner", "modified_by", "parent", "parentfield", "parenttype"):
+				value = cstr(f.value)
 				fallback = "''"
 
 			else:
@@ -905,7 +998,15 @@ class DatabaseQuery:
 				f.operator = "ilike"
 			condition = f"{column_name} {f.operator} {value}"
 		else:
-			condition = f"ifnull({column_name}, {fallback}) {f.operator} {value}"
+			# PERF: try to transform ifnull into two conditions, this way query plan can use index
+			# intersection instead of full table scans.
+			if fallback == value and f.operator == "=":
+				condition = f"( {column_name} is NULL OR {column_name} {f.operator} {value} )"
+			elif fallback == value and f.operator == "!=":
+				# NULL != anything is always NULL, so won't match
+				condition = f"{column_name} {f.operator} {value}"
+			else:
+				condition = f"ifnull({column_name}, {fallback}) {f.operator} {value}"
 
 		return condition
 
@@ -923,7 +1024,8 @@ class DatabaseQuery:
 		role_permissions = frappe.permissions.get_role_permissions(self.doctype_meta, user=self.user)
 		if (
 			not self.doctype_meta.istable
-			and not (role_permissions.get("select") or role_permissions.get("read"))
+			and not role_permissions.get("select")
+			and not role_permissions.get("read")
 			and not self.flags.ignore_permissions
 			and not has_any_user_permission_for_doctype(self.doctype, self.user, self.reference_doctype)
 		):
@@ -982,7 +1084,6 @@ class DatabaseQuery:
 		)
 
 	def add_user_permissions(self, user_permissions):
-		doctype_link_fields = []
 		doctype_link_fields = self.doctype_meta.get_link_fields()
 
 		# append current doctype with fieldname as 'name' as first link field
@@ -1041,20 +1142,17 @@ class DatabaseQuery:
 			self._fetch_shared_documents = True
 			self.match_filters.append(match_filters)
 
-	def get_permission_query_conditions(self):
+	def get_permission_query_conditions(self) -> str:
 		conditions = []
-		condition_methods = frappe.get_hooks("permission_query_conditions", {}).get(self.doctype, [])
-		if condition_methods:
-			for method in condition_methods:
-				c = frappe.call(frappe.get_attr(method), self.user)
-				if c:
-					conditions.append(c)
+		hooks = frappe.get_hooks("permission_query_conditions", {})
+		condition_methods = hooks.get(self.doctype, []) + hooks.get("*", [])
+		for method in condition_methods:
+			if c := frappe.call(frappe.get_attr(method), self.user, doctype=self.doctype):
+				conditions.append(c)
 
-		permision_script_name = get_server_script_map().get("permission_query", {}).get(self.doctype)
-		if permision_script_name:
-			script = frappe.get_doc("Server Script", permision_script_name)
-			condition = script.get_permission_query_conditions(self.user)
-			if condition:
+		if permission_script_name := get_server_script_map().get("permission_query", {}).get(self.doctype):
+			script = frappe.get_doc("Server Script", permission_script_name)
+			if condition := script.get_permission_query_conditions(self.user):
 				conditions.append(condition)
 
 		return " and ".join(conditions) if conditions else ""
@@ -1072,6 +1170,8 @@ class DatabaseQuery:
 					self.fields[0].lower().startswith("count(")
 					or self.fields[0].lower().startswith("min(")
 					or self.fields[0].lower().startswith("max(")
+					or self.fields[0].lower().startswith("sum(")
+					or self.fields[0].lower().startswith("avg(")
 				)
 				and not self.group_by
 			)
@@ -1081,44 +1181,64 @@ class DatabaseQuery:
 				if self.doctype_meta.sort_field and "," in self.doctype_meta.sort_field:
 					# multiple sort given in doctype definition
 					# Example:
-					# `idx desc, modified desc`
+					# `idx desc, creation desc`
 					# will covert to
-					# `tabItem`.`idx` desc, `tabItem`.`modified` desc
+					# `tabItem`.`idx` desc, `tabItem`.`creation` desc
 					args.order_by = ", ".join(
 						f"`tab{self.doctype}`.`{f_split[0].strip()}` {f_split[1].strip()}"
 						for f in self.doctype_meta.sort_field.split(",")
 						if (f_split := f.split(maxsplit=2))
 					)
 				else:
-					sort_field = self.doctype_meta.sort_field or "modified"
+					sort_field = self.doctype_meta.sort_field or "creation"
 					sort_order = (self.doctype_meta.sort_field and self.doctype_meta.sort_order) or "desc"
 					if self.order_by:
-						args.order_by = f"`tab{self.doctype}`.`{sort_field or 'modified'}` {sort_order or 'desc'}"
-
-				# draft docs always on top
-				if hasattr(self.doctype_meta, "is_submittable") and self.doctype_meta.is_submittable:
-					if self.order_by:
-						args.order_by = f"`tab{self.doctype}`.docstatus asc, {args.order_by}"
+						args.order_by = (
+							f"`tab{self.doctype}`.`{sort_field or 'creation'}` {sort_order or 'desc'}"
+						)
 
 	def validate_order_by_and_group_by(self, parameters: str):
 		"""Check order by, group by so that atleast one column is selected and does not have subquery"""
 		if not parameters:
 			return
 
-		blacklisted_sql_functions = {
-			"sleep",
-		}
 		_lower = parameters.lower()
-
-		if "select" in _lower and "from" in _lower:
-			frappe.throw(_("Cannot use sub-query in order by"))
 
 		if ORDER_GROUP_PATTERN.match(_lower):
 			frappe.throw(_("Illegal SQL Query"))
 
+		subquery_indicators = {
+			r"union",
+			r"intersect",
+			r"select\b.*\bfrom",
+		}
+
+		# Replace doctype names with a hardcoded string "doc"
+		# This is to avoid false positives based on doctype name
+		sanitized = re.sub(r"`tab[^`]*`", " doc ", _lower)
+
+		# Run the subquery checks against the sanitized string
+		if any(re.search(r"\b" + pattern + r"\b", sanitized) for pattern in subquery_indicators):
+			frappe.throw(_("Cannot use sub-query here."))
+
+		blacklisted_sql_functions = {
+			"sleep",
+			"benchmark",
+			"extractvalue",
+			"database",
+			"user",
+			"current_user",
+			"version",
+			"substr",
+			"substring",
+			"updatexml",
+			"load_file",
+			"session_user",
+			"system_user",
+		}
+
 		for field in parameters.split(","):
 			field = field.strip()
-			function = field.split("(", 1)[0].rstrip().lower()
 			full_field_name = "." in field and field.startswith("`tab")
 
 			if full_field_name:
@@ -1128,8 +1248,10 @@ class DatabaseQuery:
 						tbl = tbl[4:-1]
 					frappe.throw(_("Please select atleast 1 column from {0} to sort/group").format(tbl))
 
-			if function in blacklisted_sql_functions:
-				frappe.throw(_("Cannot use {0} in order/group by").format(field))
+			# Check for SQL function using regex with word boundaries and optional whitespace before parenthesis
+			for func in blacklisted_sql_functions:
+				if re.search(r"\b" + re.escape(func) + r"\W*\(", field.lower()):
+					frappe.throw(_("Cannot use {0} in order/group by").format(field))
 
 	def add_limit(self):
 		if self.limit_page_length:
@@ -1143,11 +1265,16 @@ class DatabaseQuery:
 				continue
 
 			r._comment_count = 0
-			if "_comments" in r:
-				r._comment_count = len(json.loads(r._comments or "[]"))
+			if "_comments" in r and r._comments:
+				# perf: Avoid parsing _comments, they can be huge and this is just a "UX feature"
+				r._comment_count = r._comments.count('"comment"')
 
 	def update_user_settings(self):
 		# update user settings if new search
+		if not self.save_user_settings_fields and not getattr(self, "user_settings", None):
+			# Nothing has changed or needs to be changed
+			return
+
 		user_settings = json.loads(get_user_settings(self.doctype))
 
 		if hasattr(self, "user_settings"):
@@ -1173,8 +1300,7 @@ def cast_name(column: str) -> str:
 	Example:
 	input - "ifnull(`tabBlog Post`.`name`, '')=''"
 	output - "ifnull(cast(`tabBlog Post`.`name` as varchar), '')=''" """
-
-	if frappe.db.db_type == "mariadb":
+	if frappe.db.db_type != "postgres":
 		return column
 
 	kwargs = {"string": column}
@@ -1191,22 +1317,6 @@ def cast_name(column: str) -> str:
 	return column
 
 
-def check_parent_permission(parent, child_doctype):
-	if parent:
-		# User may pass fake parent and get the information from the child table
-		if child_doctype and not (
-			frappe.db.exists("DocField", {"parent": parent, "options": child_doctype})
-			or frappe.db.exists("Custom Field", {"dt": parent, "options": child_doctype})
-		):
-			raise frappe.PermissionError
-
-		if frappe.permissions.has_permission(parent):
-			return
-
-	# Either parent not passed or the user doesn't have permission on parent doctype of child table!
-	raise frappe.PermissionError
-
-
 def get_order_by(doctype, meta):
 	order_by = ""
 
@@ -1214,23 +1324,19 @@ def get_order_by(doctype, meta):
 	if meta.sort_field and "," in meta.sort_field:
 		# multiple sort given in doctype definition
 		# Example:
-		# `idx desc, modified desc`
+		# `idx desc, creation desc`
 		# will covert to
-		# `tabItem`.`idx` desc, `tabItem`.`modified` desc
+		# `tabItem`.`idx` desc, `tabItem`.`creation` desc
 		order_by = ", ".join(
-			f"`tab{doctype}`.`{f_split[0].strip()}` {f_split[1].strip()}"
+			f"{f_split[0].strip()} {f_split[1].strip()}"
 			for f in meta.sort_field.split(",")
 			if (f_split := f.split(maxsplit=2))
 		)
 
 	else:
-		sort_field = meta.sort_field or "modified"
+		sort_field = meta.sort_field or "creation"
 		sort_order = (meta.sort_field and meta.sort_order) or "desc"
-		order_by = f"`tab{doctype}`.`{sort_field or 'modified'}` {sort_order or 'desc'}"
-
-	# draft docs always on top
-	if meta.is_submittable:
-		order_by = f"`tab{doctype}`.docstatus asc, {order_by}"
+		order_by = f"{sort_field} {sort_order}"
 
 	return order_by
 
@@ -1247,31 +1353,56 @@ def has_any_user_permission_for_doctype(doctype, user, applicable_for):
 
 
 def get_between_date_filter(value, df=None):
+	"""Handle datetime filter bounds for between filter values.
+
+	If date is passed but fieldtype is datetime then
+	        from part is converted to start of day and to part is converted to end of day.
+	If any of filter part (to or from) are missing then:
+	        start or end of current day is assumed as fallback.
+	If fieldtypes match with filter values then:
+	        no change is applied.
 	"""
-	return the formattted date as per the given example
-	[u'2017-11-01', u'2017-11-03'] => '2017-11-01 00:00:00.000000' AND '2017-11-04 00:00:00.000000'
-	"""
+
+	fieldtype = (df and df.fieldtype) or "Datetime"
+
 	from_date = frappe.utils.nowdate()
 	to_date = frappe.utils.nowdate()
 
-	if value and isinstance(value, (list, tuple)):
+	if value and isinstance(value, list | tuple):
 		if len(value) >= 1:
 			from_date = value[0]
 		if len(value) >= 2:
 			to_date = value[1]
 
-	if not df or (df and df.fieldtype == "Datetime"):
-		to_date = add_to_date(to_date, days=1)
+	# if filter value is date but fieldtype is datetime:
+	if fieldtype == "Datetime":
+		from_date = _convert_type_for_between_filters(from_date, set_time=datetime.time())
+		to_date = _convert_type_for_between_filters(to_date, set_time=datetime.time(23, 59, 59, 999999))
 
-	if df and df.fieldtype == "Datetime":
-		data = "'{}' AND '{}'".format(
-			frappe.db.format_datetime(from_date),
-			frappe.db.format_datetime(to_date),
-		)
+	# If filter value is already datetime, do nothing.
+	if fieldtype == "Datetime":
+		cond = f"'{frappe.db.format_datetime(from_date)}' AND '{frappe.db.format_datetime(to_date)}'"
 	else:
-		data = f"'{frappe.db.format_date(from_date)}' AND '{frappe.db.format_date(to_date)}'"
+		cond = f"'{frappe.db.format_date(from_date)}' AND '{frappe.db.format_date(to_date)}'"
 
-	return data
+	return cond
+
+
+def _convert_type_for_between_filters(
+	value: DateTimeLikeObject, set_time: datetime.time
+) -> datetime.datetime:
+	if isinstance(value, str):
+		if " " in value.strip():
+			value = get_datetime(value)
+		else:
+			value = getdate(value)
+
+	if isinstance(value, datetime.datetime):
+		return value
+	elif isinstance(value, datetime.date):
+		return datetime.datetime.combine(value, set_time)
+
+	return value
 
 
 def get_additional_filter_field(additional_filters_config, f, value):
@@ -1307,7 +1438,7 @@ def get_date_range(operator: str, value: str):
 
 
 def requires_owner_constraint(role_permissions):
-	"""Returns True if "select" or "read" isn't available without being creator."""
+	"""Return True if "select" or "read" isn't available without being creator."""
 
 	if not role_permissions.get("has_if_owner_enabled"):
 		return

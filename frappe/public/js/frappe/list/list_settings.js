@@ -12,6 +12,7 @@ export default class ListSettings {
 		this.fields =
 			this.settings && this.settings.fields ? JSON.parse(this.settings.fields) : [];
 		this.subject_field = null;
+		this.max_number_of_fields = 50;
 
 		frappe.model.with_doctype("List View Settings", () => {
 			this.make();
@@ -29,7 +30,7 @@ export default class ListSettings {
 		let list_view_settings = frappe.get_meta("List View Settings");
 
 		me.dialog = new frappe.ui.Dialog({
-			title: __("{0} Settings", [__(me.doctype)]),
+			title: __("{0} List View Settings", [__(me.doctype)]),
 			fields: list_view_settings.fields,
 		});
 		me.dialog.set_values(me.settings);
@@ -54,8 +55,6 @@ export default class ListSettings {
 				},
 			});
 		});
-
-		me.dialog.fields_dict["total_fields"].df.onchange = () => me.refresh();
 	}
 
 	refresh() {
@@ -74,12 +73,15 @@ export default class ListSettings {
 		}
 
 		if (!me.dialog.get_value("total_fields")) {
-			let field_count = me.fields.length;
+			let field_count = this.settings.total_fields;
 
-			if (field_count < 4) {
-				field_count = 4;
-			} else if (field_count > 10) {
-				field_count = 10;
+			if (!field_count) {
+				field_count = me.fields.length;
+				if (field_count < 4) {
+					field_count = 4;
+				} else if (field_count > 10) {
+					field_count = 10;
+				}
 			}
 
 			me.dialog.set_value("total_fields", field_count);
@@ -98,10 +100,9 @@ export default class ListSettings {
 		let fields_html = me.dialog.get_field("fields_html");
 		let wrapper = fields_html.$wrapper[0];
 		let fields = ``;
-		let total_fields = me.dialog.get_values().total_fields || me.settings.total_fields;
 
 		for (let idx in me.fields) {
-			if (idx == parseInt(total_fields)) {
+			if (idx == parseInt(this.max_number_of_fields)) {
 				break;
 			}
 			let is_sortable = idx == 0 ? `` : `sortable`;
@@ -114,15 +115,15 @@ export default class ListSettings {
 					data-label="${me.fields[idx].label}" data-type="${me.fields[idx].type}">
 
 					<div class="row">
-						<div class="col-md-1">
+						<div class="col-1">
 							${frappe.utils.icon("drag", "xs", "", "", "sortable-handle " + show_sortable_handle)}
 						</div>
-						<div class="col-md-10" style="padding-left:0px;">
-							${me.fields[idx].label}
+						<div class="col-10" style="padding-left:0px;">
+							${__(me.fields[idx].label, null, me.doctype)}
 						</div>
-						<div class="col-md-1 ${can_remove}">
+						<div class="col-1 ${can_remove} pl-0 pl-sm-3">
 							<a class="text-muted remove-field" data-fieldname="${me.fields[idx].fieldname}">
-								${frappe.utils.icon("delete", "xs")}
+								${frappe.utils.icon("trash", "xs")}
 							</a>
 						</div>
 					</div>
@@ -132,16 +133,16 @@ export default class ListSettings {
 		fields_html.html(`
 			<div class="form-group">
 				<div class="clearfix">
-					<label class="control-label" style="padding-right: 0px;">Fields</label>
+					<label class="control-label" style="padding-right: 0px;">${__("Fields")}</label>
+					<label class="text-extra-muted float-right">
+						<a class="add-new-fields text-muted">
+							${__("+ Add / Remove Fields")}
+						</a>
+					</label>
 				</div>
 				<div class="control-input-wrapper">
 				${fields}
 				</div>
-				<p class="help-box small text-muted">
-					<a class="add-new-fields text-muted">
-						+ Add / Remove Fields
-					</a>
-				</p>
 			</div>
 		`);
 
@@ -209,7 +210,7 @@ export default class ListSettings {
 		for (let idx = 0; idx < fields_order.length; idx++) {
 			me.fields.push({
 				fieldname: fields_order.item(idx).getAttribute("data-fieldname"),
-				label: fields_order.item(idx).getAttribute("data-label"),
+				label: __(fields_order.item(idx).getAttribute("data-label")),
 			});
 		}
 
@@ -230,7 +231,7 @@ export default class ListSettings {
 					click: () => me.reset_listview_fields(d),
 				},
 				{
-					label: __("Select Fields"),
+					label: __("Select Fields (Up to {0})", [this.max_number_of_fields]),
 					fieldtype: "MultiCheck",
 					fieldname: "fields",
 					options: me.get_doctype_fields(
@@ -258,13 +259,13 @@ export default class ListSettings {
 			for (let idx in values) {
 				let value = values[idx];
 
-				if (me.fields.length === parseInt(me.dialog.get_values().total_fields)) {
+				if (me.fields.length === parseInt(this.max_number_of_fields)) {
 					break;
 				} else if (value != me.subject_field.fieldname) {
 					let field = frappe.meta.get_docfield(me.doctype, value);
 					if (field) {
 						me.fields.push({
-							label: field.label,
+							label: __(field.label, null, me.doctype),
 							fieldname: field.fieldname,
 						});
 					}
@@ -316,11 +317,11 @@ export default class ListSettings {
 		meta.fields.forEach((field) => {
 			if (
 				field.in_list_view &&
-				!in_list(frappe.model.no_value_type, field.fieldtype) &&
+				!frappe.model.no_value_type.includes(field.fieldtype) &&
 				me.subject_field.fieldname != field.fieldname
 			) {
 				me.fields.push({
-					label: field.label,
+					label: __(field.label, null, me.doctype),
 					fieldname: field.fieldname,
 				});
 			}
@@ -331,7 +332,7 @@ export default class ListSettings {
 		let me = this;
 
 		me.subject_field = {
-			label: "ID",
+			label: __("ID"),
 			fieldname: "name",
 		};
 
@@ -339,7 +340,7 @@ export default class ListSettings {
 			let field = frappe.meta.get_docfield(me.doctype, meta.title_field.trim());
 
 			me.subject_field = {
-				label: field.label,
+				label: __(field.label, null, me.doctype),
 				fieldname: field.fieldname,
 			};
 		}
@@ -353,7 +354,7 @@ export default class ListSettings {
 		if (frappe.has_indicator(me.doctype)) {
 			me.fields.push({
 				type: "Status",
-				label: "Status",
+				label: __("Status"),
 				fieldname: "status_field",
 			});
 		}
@@ -363,11 +364,11 @@ export default class ListSettings {
 		let multiselect_fields = [];
 
 		meta.fields.forEach((field) => {
-			if (!in_list(frappe.model.no_value_type, field.fieldtype)) {
+			if (!frappe.model.no_value_type.includes(field.fieldtype)) {
 				multiselect_fields.push({
-					label: field.label,
+					label: __(field.label, null, field.doctype),
 					value: field.fieldname,
-					checked: in_list(fields, field.fieldname),
+					checked: fields.includes(field.fieldname),
 				});
 			}
 		});
@@ -384,7 +385,7 @@ export default class ListSettings {
 		}
 
 		existing_fields.forEach((column) => {
-			if (!in_list(new_fields, column)) {
+			if (!new_fields.includes(column)) {
 				removed_fields.push(column);
 			}
 		});

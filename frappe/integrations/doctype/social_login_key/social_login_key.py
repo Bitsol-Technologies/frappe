@@ -54,11 +54,22 @@ class SocialLoginKey(Document):
 		icon: DF.Data | None
 		provider_name: DF.Data
 		redirect_url: DF.Data | None
+		show_in_resource_metadata: DF.Check
+		sign_ups: DF.Literal["", "Allow", "Deny"]
 		social_login_provider: DF.Literal[
-			"Custom", "Facebook", "Frappe", "GitHub", "Google", "Office 365", "Salesforce", "fairlogin"
+			"Custom",
+			"Facebook",
+			"Frappe",
+			"GitHub",
+			"Google",
+			"Office 365",
+			"Salesforce",
+			"fairlogin",
+			"Keycloak",
 		]
 		user_id_property: DF.Data | None
 	# end: auto-generated types
+
 	def autoname(self):
 		self.name = frappe.scrub(self.provider_name)
 
@@ -73,13 +84,22 @@ class SocialLoginKey(Document):
 		if not self.redirect_url:
 			frappe.throw(_("Please enter Redirect URL"), exc=RedirectUrlNotSetError)
 		if self.enable_social_login and not self.client_id:
-			frappe.throw(
-				_("Please enter Client ID before social login is enabled"), exc=ClientIDNotSetError
-			)
+			frappe.throw(_("Please enter Client ID before social login is enabled"), exc=ClientIDNotSetError)
 		if self.enable_social_login and not self.client_secret:
 			frappe.throw(
 				_("Please enter Client Secret before social login is enabled"), exc=ClientSecretNotSetError
 			)
+		if self.auth_url_data:
+			try:
+				json.loads(self.auth_url_data)
+			except json.JSONDecodeError:
+				frappe.throw(_("Auth URL data should be valid JSON"))
+
+		if self.api_endpoint_args:
+			try:
+				json.loads(self.api_endpoint_args)
+			except json.JSONDecodeError:
+				frappe.throw(_("API Endpoint Args should be valid JSON"))
 
 	def set_icon(self):
 		icon_map = {
@@ -206,6 +226,19 @@ class SocialLoginKey(Document):
 			"auth_url_data": json.dumps({"response_type": "code", "scope": "openid"}),
 		}
 
+		providers["Keycloak"] = {
+			"provider_name": "Keycloak",
+			"enable_social_login": 1,
+			"custom_base_url": 1,
+			"redirect_url": "/api/method/frappe.integrations.oauth2_logins.login_via_keycloak",
+			"api_endpoint": "/protocol/openid-connect/userinfo",
+			"api_endpoint_args": None,
+			"authorize_url": "/protocol/openid-connect/auth",
+			"access_token_url": "/protocol/openid-connect/token",
+			"user_id_property": "preferred_username",
+			"auth_url_data": json.dumps({"response_type": "code", "scope": "openid"}),
+		}
+
 		# Initialize the doc and return, used in patch
 		# Or can be used for creating key from controller
 		if initialize and provider:
@@ -214,3 +247,13 @@ class SocialLoginKey(Document):
 			return
 
 		return providers.get(provider) if provider else providers
+
+
+def provider_allows_signup(provider: str) -> bool:
+	from frappe.website.utils import is_signup_disabled
+
+	sign_up_config = frappe.db.get_value("Social Login Key", provider, "sign_ups")
+
+	if not sign_up_config:  # fallback to global settings
+		return not is_signup_disabled()
+	return sign_up_config == "Allow"

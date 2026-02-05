@@ -9,15 +9,16 @@ from werkzeug.test import TestResponse
 
 import frappe
 from frappe.integrations.oauth2 import encode_params
-from frappe.test_runner import make_test_records
+from frappe.tests import IntegrationTestCase
 from frappe.tests.test_api import get_test_client, make_request, suppress_stdout
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests.utils import make_test_records
+from frappe.utils.oauth import build_oauth_url
 
 if TYPE_CHECKING:
 	from frappe.integrations.doctype.social_login_key.social_login_key import SocialLoginKey
 
 
-class FrappeRequestTestCase(FrappeTestCase):
+class FrappeRequestTestCase(IntegrationTestCase):
 	@property
 	def sid(self) -> str:
 		if not getattr(self, "_sid", None):
@@ -64,7 +65,7 @@ class TestOAuth20(FrappeRequestTestCase):
 		cls.redirect_uri = "http://localhost"
 
 		# Set Frappe server URL reqired for id_token generation
-		frappe_login_key: "SocialLoginKey" = frappe.new_doc("Social Login Key")
+		frappe_login_key: SocialLoginKey = frappe.new_doc("Social Login Key")
 		frappe_login_key.get_social_login_provider("Frappe", initialize=True)
 		frappe_login_key.base_url = frappe.utils.get_url()
 		frappe_login_key.enable_social_login = 0
@@ -316,7 +317,7 @@ class TestOAuth20(FrappeRequestTestCase):
 		frappe.db.commit()
 
 	def test_openid_code_id_token(self):
-		client = update_client_for_auth_code_grant(self.client_id)
+		update_client_for_auth_code_grant(self.client_id)
 		nonce = frappe.generate_hash()
 
 		# Go to Authorize url
@@ -360,6 +361,28 @@ class TestOAuth20(FrappeRequestTestCase):
 
 		self.assertTrue(payload.get("nonce") == nonce)
 
+	def test_build_oauth_url(self):
+		self.assertEqual(build_oauth_url("https://example.com", "/endpoint"), "https://example.com/endpoint")
+
+		self.assertEqual(build_oauth_url("https://example.com"), "https://example.com")
+
+		self.assertEqual(build_oauth_url("https://example.com", None), "https://example.com")
+
+		self.assertEqual(
+			build_oauth_url("https://example.com", "//endpoint.com/test"),
+			"https://example.com//endpoint.com/test",
+		)
+
+		self.assertEqual(
+			build_oauth_url("https://example.com", "http://endpoint.com/test"), "http://endpoint.com/test"
+		)
+
+		self.assertEqual(
+			build_oauth_url("https://example.com", "https://endpoint.com"), "https://endpoint.com"
+		)
+
+		self.assertEqual(build_oauth_url("https://example.com", ""), "https://example.com")
+
 	def decode_id_token(self, id_token):
 		import jwt
 
@@ -391,9 +414,7 @@ def check_valid_openid_response(access_token=None, client: "FrappeRequestTestCas
 
 
 def login(session):
-	session.post(
-		get_full_url("/api/method/login"), data={"usr": "test@example.com", "pwd": "Eastern_43A1W"}
-	)
+	session.post(get_full_url("/api/method/login"), data={"usr": "test@example.com", "pwd": "Eastern_43A1W"})
 
 
 def get_full_url(endpoint):

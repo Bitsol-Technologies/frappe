@@ -1,14 +1,19 @@
 # Copyright (c) 2021, Frappe Technologies Pvt. Ltd. and Contributors
 # MIT License. See LICENSE
-from urllib.parse import quote
+import base64
+import binascii
+from urllib.parse import quote, unquote, urlencode, urlparse
+
+from werkzeug.wrappers import Response
 
 import frappe
 import frappe.database
 import frappe.utils
 import frappe.utils.user
 from frappe import _
+from frappe.apps import get_default_path
 from frappe.core.doctype.activity_log.activity_log import add_authentication_log
-from frappe.sessions import Session, clear_sessions, delete_session
+from frappe.sessions import Session, clear_sessions, delete_session, get_expiry_in_seconds
 from frappe.translate import get_language
 from frappe.twofactor import (
 	authenticate_for_2factor,
@@ -17,11 +22,12 @@ from frappe.twofactor import (
 	should_run_2fa,
 )
 from frappe.utils import cint, date_diff, datetime, get_datetime, today
-from frappe.utils.password import check_password
+from frappe.utils.password import check_password, get_decrypted_password
 from frappe.website.utils import get_home_page
 
 SAFE_HTTP_METHODS = frozenset(("GET", "HEAD", "OPTIONS"))
 UNSAFE_HTTP_METHODS = frozenset(("POST", "PUT", "DELETE", "PATCH"))
+MAX_PASSWORD_SIZE = 512
 
 
 class HTTPRequest:
@@ -55,12 +61,13 @@ class HTTPRequest:
 
 	def set_request_ip(self):
 		if frappe.get_request_header("X-Forwarded-For"):
-			frappe.local.request_ip = (
-				frappe.get_request_header("X-Forwarded-For").split(",", 1)[0]
-			).strip()
+			frappe.local.request_ip = (frappe.get_request_header("X-Forwarded-For").split(",", 1)[0]).strip()
 
 		elif frappe.get_request_header("REMOTE_ADDR"):
 			frappe.local.request_ip = frappe.get_request_header("REMOTE_ADDR")
+
+		elif frappe.request and getattr(frappe.request, "remote_addr", None):
+			frappe.local.request_ip = frappe.request.remote_addr
 
 		else:
 			frappe.local.request_ip = "127.0.0.1"
@@ -82,6 +89,7 @@ class HTTPRequest:
 				(frappe.get_request_header("X-Frappe-CSRF-Token") or frappe.form_dict.pop("csrf_token", None))
 				== saved_token
 			)
+			or self.is_allowed_referrer()
 		):
 			return
 
@@ -91,10 +99,27 @@ class HTTPRequest:
 	def set_lang(self):
 		frappe.local.lang = get_language()
 
+	def is_allowed_referrer(self):
+		referrer = frappe.get_request_header("Referer")
+		origin = frappe.get_request_header("Origin")
+
+		# Get the list of allowed referrers from cache or configuration
+		allowed_referrers = frappe.cache.get_value(
+			"allowed_referrers",
+			generator=lambda: frappe.conf.get("allowed_referrers", []),
+		)
+
+		# Check if the referrer or origin is in the allowed list
+		if referrer:
+			referrer_parsed = urlparse(referrer)
+			if any(referrer_parsed.netloc == urlparse(allowed).netloc for allowed in allowed_referrers):
+				return True
+
+		return origin in allowed_referrers if origin else False
+
 
 class LoginManager:
-
-	__slots__ = ("user", "info", "full_name", "user_type", "resume")
+	__slots__ = ("full_name", "info", "resume", "user", "user_lang", "user_type")
 
 	def __init__(self):
 		self.user = None
@@ -102,28 +127,25 @@ class LoginManager:
 		self.full_name = None
 		self.user_type = None
 
-		if (
-			frappe.local.form_dict.get("cmd") == "login" or frappe.local.request.path == "/api/method/login"
-		):
+		if frappe.local.form_dict.get("cmd") == "login" or frappe.local.request.path == "/api/method/login":
 			if self.login() is False:
 				return
 			self.resume = False
-
-			# run login triggers
-			self.run_trigger("on_session_creation")
 		else:
 			try:
 				self.resume = True
 				self.make_session(resume=True)
 				self.get_user_info()
 				self.set_user_info(resume=True)
-			except AttributeError:
+			except (AttributeError, frappe.DoesNotExistError):
 				self.user = "Guest"
 				self.get_user_info()
 				self.make_session()
 				self.set_user_info()
 
 	def login(self):
+		self.run_trigger("before_login")
+
 		if frappe.get_system_settings("disable_user_pass_login"):
 			frappe.throw(_("Login with username and password is not allowed."), frappe.AuthenticationError)
 
@@ -133,9 +155,7 @@ class LoginManager:
 		self.authenticate(user=user, pwd=pwd)
 		if self.force_user_to_reset_password():
 			doc = frappe.get_doc("User", self.user)
-			frappe.local.response["redirect_to"] = doc.reset_password(
-				send_email=False, password_expired=True
-			)
+			frappe.local.response["redirect_to"] = doc.reset_password(send_email=False, password_expired=True)
 			frappe.local.response["message"] = "Password Reset"
 			return False
 
@@ -146,12 +166,12 @@ class LoginManager:
 		frappe.form_dict.pop("pwd", None)
 		self.post_login()
 
-	def post_login(self):
+	def post_login(self, session_end: str | None = None, audit_user: str | None = None):
 		self.run_trigger("on_login")
 		validate_ip_address(self.user)
 		self.validate_hour()
 		self.get_user_info()
-		self.make_session()
+		self.make_session(session_end=session_end, audit_user=audit_user)
 		self.setup_boot_cache()
 		self.set_user_info()
 
@@ -159,13 +179,12 @@ class LoginManager:
 		self.info = frappe.get_cached_value(
 			"User", self.user, ["user_type", "first_name", "last_name", "user_image"], as_dict=1
 		)
-
 		self.user_type = self.info.user_type
 
 	def setup_boot_cache(self):
 		frappe.cache_manager.build_table_count_cache()
-		frappe.cache_manager.build_domain_restriced_doctype_cache()
-		frappe.cache_manager.build_domain_restriced_page_cache()
+		frappe.cache_manager.build_domain_restricted_doctype_cache()
+		frappe.cache_manager.build_domain_restricted_page_cache()
 
 	def set_user_info(self, resume=False):
 		# set sid again
@@ -174,42 +193,51 @@ class LoginManager:
 		self.full_name = " ".join(filter(None, [self.info.first_name, self.info.last_name]))
 
 		if self.info.user_type == "Website User":
-			frappe.local.cookie_manager.set_cookie("system_user", "no")
+			frappe.local.cookie_manager.set_cookie("system_user", "no", deduplicate=True)
 			if not resume:
 				frappe.local.response["message"] = "No App"
-				frappe.local.response["home_page"] = "/" + get_home_page()
+				frappe.local.response["home_page"] = get_default_path() or "/" + get_home_page()
 		else:
-			frappe.local.cookie_manager.set_cookie("system_user", "yes")
+			frappe.local.cookie_manager.set_cookie("system_user", "yes", deduplicate=True)
 			if not resume:
 				frappe.local.response["message"] = "Logged In"
-				frappe.local.response["home_page"] = "/app"
+				frappe.local.response["home_page"] = get_default_path() or "/desk"
 
 		if not resume:
 			frappe.response["full_name"] = self.full_name
 
 		# redirect information
-		redirect_to = frappe.cache.hget("redirect_after_login", self.user)
-		if redirect_to:
+		if not resume and (redirect_to := frappe.cache.hget("redirect_after_login", self.user)):
 			frappe.local.response["redirect_to"] = redirect_to
 			frappe.cache.hdel("redirect_after_login", self.user)
 
-		frappe.local.cookie_manager.set_cookie("full_name", self.full_name)
-		frappe.local.cookie_manager.set_cookie("user_id", self.user)
-		frappe.local.cookie_manager.set_cookie("user_image", self.info.user_image or "")
+		frappe.local.cookie_manager.set_cookie("full_name", self.full_name, deduplicate=True)
+		frappe.local.cookie_manager.set_cookie("user_id", self.user, deduplicate=True)
+		frappe.local.cookie_manager.set_cookie("user_image", self.info.user_image or "", deduplicate=True)
+		frappe.local.cookie_manager.set_cookie("user_lang", frappe.local.lang, deduplicate=True)
 
 	def clear_preferred_language(self):
 		frappe.local.cookie_manager.delete_cookie("preferred_language")
 
-	def make_session(self, resume=False):
+	def make_session(
+		self, resume: bool = False, session_end: str | None = None, audit_user: str | None = None
+	):
 		# start session
 		frappe.local.session_obj = Session(
-			user=self.user, resume=resume, full_name=self.full_name, user_type=self.user_type
+			user=self.user,
+			resume=resume,
+			full_name=self.full_name,
+			user_type=self.user_type,
+			session_end=session_end,
+			audit_user=audit_user,
 		)
 
 		# reset user if changed to Guest
 		self.user = frappe.local.session_obj.user
 		frappe.local.session = frappe.local.session_obj.data
 		self.clear_active_sessions()
+		if not resume:
+			self.run_trigger("on_session_creation")
 
 	def clear_active_sessions(self):
 		"""Clear other sessions of the current user if `deny_multiple_sessions` is not set"""
@@ -224,7 +252,7 @@ class LoginManager:
 
 		clear_sessions(frappe.session.user, keep_current=True)
 
-	def authenticate(self, user: str = None, pwd: str = None):
+	def authenticate(self, user: str | None = None, pwd: str | None = None):
 		from frappe.core.doctype.user.user import User
 
 		if not (user and pwd):
@@ -232,26 +260,34 @@ class LoginManager:
 		if not (user and pwd):
 			self.fail(_("Incomplete login details"), user=user)
 
+		if len(pwd) > MAX_PASSWORD_SIZE:
+			self.fail(_("Password size exceeded the maximum allowed size"), user=user)
+
 		_raw_user_name = user
 		user = User.find_by_credentials(user, pwd)
 
+		ip_tracker = get_login_attempt_tracker(frappe.local.request_ip)
 		if not user:
+			ip_tracker and ip_tracker.add_failure_attempt()
 			self.fail("Invalid login credentials", user=_raw_user_name)
 
 		# Current login flow uses cached credentials for authentication while checking OTP.
 		# Incase of OTP check, tracker for auth needs to be disabled(If not, it can remove tracker history as it is going to succeed anyway)
 		# Tracker is activated for 2FA incase of OTP.
 		ignore_tracker = should_run_2fa(user.name) and ("otp" in frappe.form_dict)
-		tracker = None if ignore_tracker else get_login_attempt_tracker(user.name)
+		user_tracker = None if ignore_tracker else get_login_attempt_tracker(user.name)
 
 		if not user.is_authenticated:
-			tracker and tracker.add_failure_attempt()
+			user_tracker and user_tracker.add_failure_attempt()
+			ip_tracker and ip_tracker.add_failure_attempt()
 			self.fail("Invalid login credentials", user=user.name)
 		elif not (user.name == "Administrator" or user.enabled):
-			tracker and tracker.add_failure_attempt()
+			user_tracker and user_tracker.add_failure_attempt()
+			ip_tracker and ip_tracker.add_failure_attempt()
 			self.fail("User disabled or missing", user=user.name)
 		else:
-			tracker and tracker.add_success_attempt()
+			user_tracker and user_tracker.add_success_attempt()
+			ip_tracker and ip_tracker.add_success_attempt()
 		self.user = user.name
 
 	def force_user_to_reset_password(self):
@@ -261,9 +297,7 @@ class LoginManager:
 		if self.user in frappe.STANDARD_USERS:
 			return False
 
-		reset_pwd_after_days = cint(
-			frappe.db.get_single_value("System Settings", "force_user_to_reset_password")
-		)
+		reset_pwd_after_days = cint(frappe.get_system_settings("force_user_to_reset_password"))
 
 		if reset_pwd_after_days:
 			last_password_reset_date = (
@@ -278,7 +312,7 @@ class LoginManager:
 	def check_password(self, user, pwd):
 		"""check password"""
 		try:
-			# returns user in correct case
+			# return user in correct case
 			return check_password(user, pwd)
 		except frappe.AuthenticationError:
 			self.fail("Incorrect password", user=user)
@@ -297,8 +331,8 @@ class LoginManager:
 
 	def validate_hour(self):
 		"""check if user is logging in during restricted hours"""
-		login_before = int(frappe.db.get_value("User", self.user, "login_before", ignore=True) or 0)
-		login_after = int(frappe.db.get_value("User", self.user, "login_after", ignore=True) or 0)
+		login_before = cint(frappe.db.get_value("User", self.user, "login_before", ignore=True))
+		login_after = cint(frappe.db.get_value("User", self.user, "login_after", ignore=True))
 
 		if not (login_before or login_after):
 			return
@@ -317,9 +351,16 @@ class LoginManager:
 		"""login as guest"""
 		self.login_as("Guest")
 
-	def login_as(self, user):
+	def login_as(self, user: str, session_end: str | None = None, audit_user: str | None = None):
 		self.user = user
-		self.post_login()
+		self.post_login(session_end, audit_user)
+
+	def impersonate(self, user):
+		current_user = frappe.session.user
+		session_data = frappe.local.session_obj.data.data
+		self.login_as(user, session_end=session_data.session_end, audit_user=session_data.audit_user)
+		# Flag this session as impersonated session, so other code can log this.
+		frappe.local.session_obj.set_impersonated(current_user)
 
 	def logout(self, arg="", user=None):
 		if not user:
@@ -329,6 +370,8 @@ class LoginManager:
 		if user == frappe.session.user:
 			delete_session(frappe.session.sid, user=user, reason="User Manually Logged Out")
 			self.clear_cookies()
+			if frappe.request:
+				self.login_as_guest()
 		else:
 			clear_sessions(user)
 
@@ -345,14 +388,29 @@ class CookieManager:
 		if not frappe.local.session.get("sid"):
 			return
 
-		# sid expires in 3 days
-		expires = datetime.datetime.now() + datetime.timedelta(days=3)
 		if frappe.session.sid:
-			self.set_cookie("sid", frappe.session.sid, expires=expires, httponly=True)
+			self.set_cookie("sid", frappe.session.sid, max_age=get_expiry_in_seconds(), httponly=True)
 
-	def set_cookie(self, key, value, expires=None, secure=False, httponly=False, samesite="Lax"):
+	def set_cookie(
+		self,
+		key,
+		value,
+		expires=None,
+		secure=False,
+		httponly=False,
+		samesite="Lax",
+		max_age=None,
+		deduplicate=False,
+	):
 		if not secure and hasattr(frappe.local, "request"):
 			secure = frappe.local.request.scheme == "https"
+		if (
+			deduplicate
+			and not (expires or max_age)
+			and (request := getattr(frappe.local, "request", None))
+			and unquote(request.cookies.get(key, "")) == value
+		):
+			return
 
 		self.cookies[key] = {
 			"value": value,
@@ -360,15 +418,16 @@ class CookieManager:
 			"secure": secure,
 			"httponly": httponly,
 			"samesite": samesite,
+			"max_age": max_age,
 		}
 
 	def delete_cookie(self, to_delete):
-		if not isinstance(to_delete, (list, tuple)):
+		if not isinstance(to_delete, list | tuple):
 			to_delete = [to_delete]
 
 		self.to_delete.extend(to_delete)
 
-	def flush_cookies(self, response):
+	def flush_cookies(self, response: Response):
 		for key, opts in self.cookies.items():
 			response.set_cookie(
 				key,
@@ -377,6 +436,7 @@ class CookieManager:
 				secure=opts.get("secure"),
 				httponly=opts.get("httponly"),
 				samesite=opts.get("samesite"),
+				max_age=opts.get("max_age"),
 			)
 
 		# expires yesterday!
@@ -394,46 +454,52 @@ def clear_cookies():
 	if hasattr(frappe.local, "session"):
 		frappe.session.sid = ""
 	frappe.local.cookie_manager.delete_cookie(
-		["full_name", "user_id", "sid", "user_image", "system_user"]
+		["full_name", "user_id", "sid", "user_image", "user_lang", "system_user"]
 	)
 
 
 def validate_ip_address(user):
-	"""check if IP Address is valid"""
-	from frappe.core.doctype.user.user import get_restricted_ip_list
+	"""
+	Method to check if the user has IP restrictions enabled, and if so is the IP address they are
+	connecting from allowlisted.
 
-	# Only fetch required fields - for perf
-	user_fields = ["restrict_ip", "bypass_restrict_ip_check_if_2fa_enabled"]
-	user_info = (
-		frappe.get_cached_value("User", user, user_fields, as_dict=True)
-		if not frappe.flags.in_test
-		else frappe.db.get_value("User", user, user_fields, as_dict=True)
-	)
-	ip_list = get_restricted_ip_list(user_info)
+	Certain methods called from our socketio backend need direct access, and so the IP is not
+	checked for those
+	"""
+	if hasattr(frappe.local, "request") and frappe.local.request.path.startswith(
+		"/api/method/frappe.realtime."
+	):
+		return True
+
+	user_info = frappe.get_cached_doc("User", user)
+	ip_list = user_info.get_restricted_ip_list()
+
 	if not ip_list:
 		return
 
-	system_settings = (
-		frappe.get_cached_doc("System Settings")
-		if not frappe.flags.in_test
-		else frappe.get_single("System Settings")
-	)
+	check_request_ip()
+	for ip in ip_list:
+		if frappe.local.request_ip.startswith(ip):
+			return
+
 	# check if bypass restrict ip is enabled for all users
-	bypass_restrict_ip_check = system_settings.bypass_restrict_ip_check_if_2fa_enabled
+	bypass_restrict_ip_check = frappe.get_system_settings("bypass_restrict_ip_check_if_2fa_enabled")
 
 	# check if two factor auth is enabled
-	if system_settings.enable_two_factor_auth and not bypass_restrict_ip_check:
+	if frappe.get_system_settings("enable_two_factor_auth") and not bypass_restrict_ip_check:
 		# check if bypass restrict ip is enabled for login user
 		bypass_restrict_ip_check = user_info.bypass_restrict_ip_check_if_2fa_enabled
 
-	for ip in ip_list:
-		if frappe.local.request_ip.startswith(ip) or bypass_restrict_ip_check:
-			return
+	if bypass_restrict_ip_check:
+		return
 
-	frappe.throw(_("Access not allowed from this IP Address"), frappe.AuthenticationError)
+	frappe.throw(
+		_("Access not allowed from this IP Address") + f": {frappe.local.request_ip}",
+		frappe.AuthenticationError,
+	)
 
 
-def get_login_attempt_tracker(user_name: str, raise_locked_exception: bool = True):
+def get_login_attempt_tracker(key: str, raise_locked_exception: bool = True):
 	"""Get login attempt tracker instance.
 
 	:param user_name: Name of the loggedin user
@@ -447,7 +513,7 @@ def get_login_attempt_tracker(user_name: str, raise_locked_exception: bool = Tru
 		tracker_kwargs["lock_interval"] = sys_settings.allow_login_after_fail
 		tracker_kwargs["max_consecutive_login_attempts"] = sys_settings.allow_consecutive_login_attempts
 
-	tracker = LoginAttemptTracker(user_name, **tracker_kwargs)
+	tracker = LoginAttemptTracker(key, **tracker_kwargs)
 
 	if raise_locked_exception and track_login_attempts and not tracker.is_user_allowed():
 		frappe.throw(
@@ -466,7 +532,12 @@ class LoginAttemptTracker:
 	"""
 
 	def __init__(
-		self, user_name: str, max_consecutive_login_attempts: int = 3, lock_interval: int = 5 * 60
+		self,
+		key: str,
+		max_consecutive_login_attempts: int = 3,
+		lock_interval: int = 5 * 60,
+		*,
+		user_name: str | None = None,
 	):
 		"""Initialize the tracker.
 
@@ -474,21 +545,25 @@ class LoginAttemptTracker:
 		:param max_consecutive_login_attempts: Maximum allowed consecutive failed login attempts
 		:param lock_interval: Locking interval incase of maximum failed attempts
 		"""
-		self.user_name = user_name
+		if user_name:
+			from frappe.deprecation_dumpster import deprecation_warning
+
+			deprecation_warning("unknown", "v17", "`username` parameter is deprecated, use `key` instead.")
+		self.key = key or user_name
 		self.lock_interval = datetime.timedelta(seconds=lock_interval)
 		self.max_failed_logins = max_consecutive_login_attempts
 
 	@property
 	def login_failed_count(self):
-		return frappe.cache.hget("login_failed_count", self.user_name)
+		return frappe.cache.hget("login_failed_count", self.key)
 
 	@login_failed_count.setter
 	def login_failed_count(self, count):
-		frappe.cache.hset("login_failed_count", self.user_name, count)
+		frappe.cache.hset("login_failed_count", self.key, count)
 
 	@login_failed_count.deleter
 	def login_failed_count(self):
-		frappe.cache.hdel("login_failed_count", self.user_name)
+		frappe.cache.hdel("login_failed_count", self.key)
 
 	@property
 	def login_failed_time(self):
@@ -496,15 +571,15 @@ class LoginAttemptTracker:
 
 		For every user we track only First failed login attempt time within lock interval of time.
 		"""
-		return frappe.cache.hget("login_failed_time", self.user_name)
+		return frappe.cache.hget("login_failed_time", self.key)
 
 	@login_failed_time.setter
 	def login_failed_time(self, timestamp):
-		frappe.cache.hset("login_failed_time", self.user_name, timestamp)
+		frappe.cache.hset("login_failed_time", self.key, timestamp)
 
 	@login_failed_time.deleter
 	def login_failed_time(self):
-		frappe.cache.hdel("login_failed_time", self.user_name)
+		frappe.cache.hdel("login_failed_time", self.key)
 
 	def add_failure_attempt(self):
 		"""Log user failure attempts into the system.
@@ -547,3 +622,122 @@ class LoginAttemptTracker:
 		):
 			return False
 		return True
+
+
+def validate_auth():
+	"""
+	Authenticate and sets user for the request.
+	"""
+	authorization_header = frappe.get_request_header("Authorization", "").split(" ")
+
+	if len(authorization_header) == 2:
+		validate_oauth(authorization_header)
+		validate_auth_via_api_keys(authorization_header)
+
+	validate_auth_via_hooks()
+
+	# If login via bearer, basic or keypair didn't work then authentication failed and we
+	# should terminate here.
+	if len(authorization_header) == 2 and frappe.session.user in ("", "Guest"):
+		raise frappe.AuthenticationError
+
+
+def validate_oauth(authorization_header):
+	"""
+	Authenticate request using OAuth and set session user
+
+	Args:
+	        authorization_header (list of str): The 'Authorization' header containing the prefix and token
+	"""
+
+	from frappe.integrations.oauth2 import get_oauth_server
+	from frappe.oauth import get_url_delimiter
+
+	if authorization_header[0].lower() != "bearer":
+		return
+
+	form_dict = frappe.local.form_dict
+	token = authorization_header[1]
+	req = frappe.request
+	parsed_url = urlparse(req.url)
+	access_token = {"access_token": token}
+	uri = parsed_url.scheme + "://" + parsed_url.netloc + parsed_url.path + "?" + urlencode(access_token)
+	http_method = req.method
+	headers = req.headers
+	body = req.get_data()
+	if req.content_type and "multipart/form-data" in req.content_type:
+		body = None
+
+	try:
+		required_scopes = frappe.db.get_value("OAuth Bearer Token", token, "scopes").split(
+			get_url_delimiter()
+		)
+		valid, _oauthlib_request = get_oauth_server().verify_request(
+			uri, http_method, body, headers, required_scopes
+		)
+		if valid:
+			frappe.set_user(frappe.db.get_value("OAuth Bearer Token", token, "user"))
+			frappe.local.form_dict = form_dict
+	except AttributeError:
+		pass
+
+
+def validate_auth_via_api_keys(authorization_header):
+	"""
+	Authenticate request using API keys and set session user
+
+	Args:
+	        authorization_header (list of str): The 'Authorization' header containing the prefix and token
+	"""
+
+	try:
+		auth_type, auth_token = authorization_header
+		authorization_source = frappe.get_request_header("Frappe-Authorization-Source")
+		if auth_type.lower() == "basic":
+			api_key, api_secret = frappe.safe_decode(base64.b64decode(auth_token)).split(":")
+			validate_api_key_secret(api_key, api_secret, authorization_source)
+		elif auth_type.lower() == "token":
+			api_key, api_secret = auth_token.split(":")
+			validate_api_key_secret(api_key, api_secret, authorization_source)
+	except binascii.Error:
+		frappe.throw(
+			_("Failed to decode token, please provide a valid base64-encoded token."),
+			frappe.InvalidAuthorizationToken,
+		)
+	except (AttributeError, TypeError, ValueError):
+		pass
+
+
+def validate_api_key_secret(api_key, api_secret, frappe_authorization_source=None):
+	"""frappe_authorization_source to provide api key and secret for a doctype apart from User"""
+	if not api_key or not api_secret:
+		raise frappe.AuthenticationError
+
+	doctype = frappe_authorization_source or "User"
+	docname = frappe.db.get_value(
+		doctype=doctype, filters={"api_key": api_key, "enabled": True}, fieldname=["name"]
+	)
+	if not docname:
+		raise frappe.AuthenticationError
+	form_dict = frappe.local.form_dict
+	doc_secret = get_decrypted_password(doctype, docname, fieldname="api_secret", raise_exception=False)
+	if doc_secret and api_secret == doc_secret:
+		if doctype == "User":
+			user = frappe.db.get_value(doctype="User", filters={"api_key": api_key}, fieldname=["name"])
+		else:
+			user = frappe.db.get_value(doctype, docname, "user")
+		if frappe.local.login_manager.user in ("", "Guest"):
+			frappe.set_user(user)
+		frappe.local.form_dict = form_dict
+	else:
+		raise frappe.AuthenticationError
+
+
+def validate_auth_via_hooks():
+	for auth_hook in frappe.get_hooks("auth_hooks", []):
+		frappe.get_attr(auth_hook)()
+
+
+def check_request_ip():
+	if frappe.local.request_ip is None:
+		frappe.local.request_ip = "127.0.0.1"

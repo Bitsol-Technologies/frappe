@@ -9,14 +9,17 @@ from frappe.query_builder.utils import (
 	DocType,
 	get_query,
 	get_query_builder,
-	patch_query_aggregation,
-	patch_query_execute,
+	patch_all,
 )
 
 pypika.terms.ValueWrapper = ParameterizedValueWrapper
+pypika.terms.Function.get_sql = ParameterizedFunction.get_sql
 pypika.terms.Function = ParameterizedFunction
 
 # * Overrides the field() method and replaces it with the a `PseudoColumn` 'field' for consistency
 pypika.queries.Selectable.__getattr__ = ignore_copy(lambda table, x: Field(x, table=table))
 pypika.queries.Selectable.__getitem__ = ignore_copy(lambda table, x: Field(x, table=table))
 pypika.queries.Selectable.field = pypika.terms.PseudoColumn("field")
+
+# run monkey patches
+patch_all()

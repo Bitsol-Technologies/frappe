@@ -5,9 +5,8 @@ frappe.ui.form.ControlSignature = class ControlSignature extends frappe.ui.form.
 		this.loading = false;
 		super.make();
 
-		if (this.df.label) {
-			$(this.wrapper).find("label").text(__(this.df.label));
-		}
+		this.set_label();
+		this.set_required();
 		this.set_doc_url();
 
 		frappe.require("/assets/frappe/js/lib/jSignature.min.js").then(() => {
@@ -43,7 +42,7 @@ frappe.ui.form.ControlSignature = class ControlSignature extends frappe.ui.form.
 			this.$reset_button_wrapper = $(`
 					<div class="signature-btn-row">
 						<a href="#" type="button" class="signature-reset btn icon-btn">
-							${frappe.utils.icon("refresh", "sm")}
+							${frappe.utils.icon("es-line-reload", "sm")}
 						</a>
 					</div>
 				`)

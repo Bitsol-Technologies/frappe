@@ -3,7 +3,11 @@ import doctype_with_phone from "../fixtures/doctype_with_phone";
 context("Control Phone", () => {
 	before(() => {
 		cy.login();
-		cy.visit("/app/website");
+		cy.visit("/desk/website");
+	});
+
+	afterEach(() => {
+		cy.clear_dialogs();
 	});
 
 	function get_dialog_with_phone() {
@@ -20,31 +24,37 @@ context("Control Phone", () => {
 
 	it("should set flag and data", () => {
 		get_dialog_with_phone().as("dialog");
+
 		cy.get(".selected-phone").click();
+		cy.wait(100);
 		cy.get(".phone-picker .phone-wrapper[id='afghanistan']").click();
+		cy.wait(100);
+		cy.get(".selected-phone .country").should("have.text", "+93");
+		cy.get(".selected-phone > img").should("have.attr", "src").and("include", "/af.svg");
+
 		cy.get(".selected-phone").click();
+		cy.wait(100);
 		cy.get(".phone-picker .phone-wrapper[id='india']").click();
+		cy.wait(100);
 		cy.get(".selected-phone .country").should("have.text", "+91");
 		cy.get(".selected-phone > img").should("have.attr", "src").and("include", "/in.svg");
 
 		let phone_number = "9312672712";
 		cy.get(".selected-phone > img").click().first();
-		cy.get_field("phone").first().click({ multiple: true });
+		cy.get_field("phone").first().click();
 		cy.get(".frappe-control[data-fieldname=phone]")
 			.findByRole("textbox")
 			.first()
-			.type(phone_number, { force: true });
+			.type(phone_number);
 
 		cy.get_field("phone").first().should("have.value", phone_number);
-		cy.get_field("phone").first().blur({ force: true });
+		cy.get_field("phone").first().blur();
 		cy.wait(100);
 		cy.get("@dialog").then((dialog) => {
 			let value = dialog.get_value("phone");
 			expect(value).to.equal("+91-" + phone_number);
 		});
-	});
 
-	it("case insensitive search for country and clear search", () => {
 		let search_text = "india";
 		cy.get(".selected-phone").click().first();
 		cy.get(".phone-picker").get(".search-phones").click().type(search_text);
@@ -55,19 +65,16 @@ context("Control Phone", () => {
 				}
 			);
 		});
-
-		cy.get(".phone-picker").get(".search-phones").clear();
-		cy.get(".phone-section .phone-wrapper").should("not.have.class", "hidden");
 	});
 
 	it("existing document should render phone field with data", () => {
-		cy.visit("/app/doctype");
+		cy.visit("/desk/doctype");
 		cy.insert_doc("DocType", doctype_with_phone, true);
 		cy.clear_cache();
 
 		// Creating custom doctype
 		cy.insert_doc("DocType", doctype_with_phone, true);
-		cy.visit("/app/doctype-with-phone");
+		cy.visit("/desk/doctype-with-phone");
 		cy.click_listview_primary_button("Add Doctype With Phone");
 
 		// create a record

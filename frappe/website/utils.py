@@ -10,9 +10,17 @@ import yaml
 from werkzeug.wrappers import Response
 
 import frappe
-from frappe import _
+from frappe.apps import get_apps, get_default_path, is_desk_apps
 from frappe.model.document import Document
-from frappe.utils import cint, cstr, get_assets_json, get_system_timezone, md_to_html
+from frappe.utils import (
+	cint,
+	cstr,
+	get_assets_json,
+	get_build_version,
+	get_system_timezone,
+	md_to_html,
+)
+from frappe.utils.user import is_portal_user
 
 FRONTMATTER_PATTERN = re.compile(r"^\s*(?:---|\+\+\+)(.*?)(?:---|\+\+\+)\s*(.+)$", re.S | re.M)
 H1_TAG_PATTERN = re.compile("<h1>([^<]*)")
@@ -22,15 +30,11 @@ CLEANUP_PATTERN_2 = re.compile("[:/]")
 CLEANUP_PATTERN_3 = re.compile(r"(-)\1+")
 
 
-def delete_page_cache(path):
-	frappe.cache.delete_value("full_index")
-	groups = ("website_page", "page_context")
+def delete_page_cache(path=None):
 	if path:
-		for name in groups:
-			frappe.cache.hdel(name, path)
+		frappe.cache.delete_value(f"{WEBSITE_PAGE_CACHE_PREFIX}{path}")
 	else:
-		for name in groups:
-			frappe.cache.delete_key(name)
+		frappe.cache.delete_keys(WEBSITE_PAGE_CACHE_PREFIX)
 
 
 def find_first_image(html):
@@ -47,6 +51,8 @@ def can_cache(no_cache=False):
 	if frappe.conf.disable_website_cache or frappe.conf.developer_mode:
 		return False
 	if getattr(frappe.local, "no_cache", False):
+		return False
+	if frappe.request and frappe.request.query_string:
 		return False
 	return not no_cache
 
@@ -89,7 +95,7 @@ def get_comment_list(doctype, name):
 
 
 def get_home_page():
-	if frappe.local.flags.home_page and not frappe.flags.in_test:
+	if frappe.local.flags.home_page and not frappe.in_test:
 		return frappe.local.flags.home_page
 
 	def _get_home_page():
@@ -119,10 +125,13 @@ def get_home_page():
 			home_page = "login" if frappe.session.user == "Guest" else "me"
 
 		home_page = home_page.strip("/")
-
+		if home_page == "me" and frappe.session.data.user_type == "System User":
+			home_page = "desk"
+		if home_page == "me" and is_portal_user():
+			home_page = "portal"
 		return home_page
 
-	if frappe.local.dev_server:
+	if frappe._dev_server:
 		# dont return cached homepage in development
 		return _get_home_page()
 
@@ -158,24 +167,39 @@ def get_home_page_via_hooks():
 
 
 def get_boot_data():
+	from frappe.integrations.frappe_providers.frappecloud_billing import is_fc_site
+	from frappe.locale import get_date_format, get_first_day_of_the_week, get_number_format, get_time_format
+
+	apps = get_apps()
+
 	return {
-		"lang": "en",
+		"lang": frappe.local.lang or "en",
+		"apps_data": {
+			"apps": apps or [],
+			"is_desk_apps": 1 if bool(is_desk_apps(apps)) else 0,
+			"default_path": get_default_path() or "",
+		},
 		"sysdefaults": {
 			"float_precision": cint(frappe.get_system_settings("float_precision")) or 3,
-			"date_format": frappe.get_system_settings("date_format") or "yyyy-mm-dd",
-			"time_format": frappe.get_system_settings("time_format") or "HH:mm:ss",
+			"date_format": get_date_format(),
+			"time_format": get_time_format(),
+			"first_day_of_the_week": get_first_day_of_the_week(),
+			"number_format": get_number_format().string,
+			"currency": frappe.get_system_settings("currency"),
 		},
 		"time_zone": {
 			"system": get_system_timezone(),
-			"user": frappe.db.get_value("User", frappe.session.user, "time_zone") or get_system_timezone(),
+			"user": frappe.get_cached_value("User", frappe.session.user, "time_zone")
+			or get_system_timezone(),
 		},
 		"assets_json": get_assets_json(),
 		"sitename": frappe.local.site,
+		"is_fc_site": 1 if is_fc_site() else 0,
 	}
 
 
 def is_signup_disabled():
-	return frappe.db.get_single_value("Website Settings", "disable_signup", True)
+	return frappe.get_website_settings("disable_signup")
 
 
 def cleanup_page_name(title: str) -> str:
@@ -242,7 +266,7 @@ def get_next_link(route, url_prefix=None, app=None):
 
 
 def get_full_index(route=None, app=None):
-	"""Returns full index of the website for www upto the n-th level"""
+	"""Return full index of the website for www upto the n-th level."""
 	from frappe.website.router import get_pages
 
 	if not frappe.local.flags.children_map:
@@ -296,7 +320,7 @@ def get_full_index(route=None, app=None):
 
 
 def extract_title(source, path):
-	"""Returns title from `&lt;!-- title --&gt;` or &lt;h1&gt; or path"""
+	"""Return title from `&lt;!-- title --&gt;` or &lt;h1&gt; or path."""
 	title = extract_comment_tag(source, "title")
 
 	if not title and "<h1>" in source:
@@ -310,9 +334,9 @@ def extract_title(source, path):
 		# make title from name
 		title = (
 			os.path.basename(
-				path.rsplit(".",)[
-					0
-				].rstrip("/")
+				path.rsplit(
+					".",
+				)[0].rstrip("/")
 			)
 			.replace("_", " ")
 			.replace("-", " ")
@@ -354,35 +378,32 @@ def clear_cache(path=None):
 	:param path: (optional) for the given path"""
 	from frappe.website.router import clear_routing_cache
 
-	for key in (
+	clear_routing_cache()
+
+	keys = [
 		"website_generator_routes",
 		"website_pages",
 		"website_full_index",
-		"sitemap_routes",
 		"languages_with_name",
 		"languages",
-	):
-		frappe.cache.delete_value(key)
+		"website_404",
+	]
 
-	clear_routing_cache()
-
-	frappe.cache.delete_value("website_404")
 	if path:
 		frappe.cache.hdel("website_redirects", path)
 		delete_page_cache(path)
 	else:
-		clear_sitemap()
 		frappe.clear_cache("Guest")
-		for key in (
+		delete_page_cache()
+		keys += [
 			"portal_menu_items",
 			"home_page",
 			"website_route_rules",
 			"doctypes_with_web_view",
 			"website_redirects",
-			"page_context",
-			"website_page",
-		):
-			frappe.cache.delete_value(key)
+		]
+
+	frappe.cache.delete_value(keys)
 
 	for method in frappe.get_hooks("website_clear_cache"):
 		frappe.get_attr(method)(path)
@@ -390,10 +411,6 @@ def clear_cache(path=None):
 
 def clear_website_cache(path=None):
 	clear_cache(path)
-
-
-def clear_sitemap():
-	delete_page_cache("*")
 
 
 def get_frontmatter(string):
@@ -407,7 +424,7 @@ def get_frontmatter(string):
 		body = result.group(2)
 
 	return {
-		"attributes": yaml.safe_load(frontmatter),
+		"attributes": yaml.safe_load(frontmatter) if frontmatter else "",
 		"body": body,
 	}
 
@@ -501,23 +518,32 @@ def get_sidebar_json_path(path, look_for=False):
 			return ""
 
 
+WEBSITE_PAGE_CACHE_PREFIX = "website_page::"
+
+
 def cache_html(func):
 	@wraps(func)
 	def cache_html_decorator(*args, **kwargs):
-		if can_cache():
+		cache_key = f"{WEBSITE_PAGE_CACHE_PREFIX}{args[0].path}"
+
+		cache_headers = {"Cache-Control": "private,max-age=300,stale-while-revalidate=10800"}
+		no_cache = frappe.request and frappe.request.cache_control.no_cache
+		if can_cache(no_cache):
 			html = None
-			page_cache = frappe.cache.hget("website_page", args[0].path)
+			page_cache = frappe.cache.get_value(cache_key)
 			if page_cache and frappe.local.lang in page_cache:
 				html = page_cache[frappe.local.lang]
 			if html:
 				frappe.local.response.from_cache = True
+				frappe.local.response_headers.update(cache_headers)
 				return html
 		html = func(*args, **kwargs)
 		context = args[0].context
 		if can_cache(context.no_cache):
-			page_cache = frappe.cache.hget("website_page", args[0].path) or {}
+			page_cache = frappe.cache.get_value(cache_key) or {}
 			page_cache[frappe.local.lang] = html
-			frappe.cache.hset("website_page", args[0].path, page_cache)
+			frappe.cache.set_value(cache_key, page_cache, expires_in_sec=30 * 60)
+			frappe.local.response_headers.update(cache_headers)
 
 		return html
 
@@ -529,14 +555,15 @@ def build_response(path, data, http_status_code, headers: dict | None = None):
 	response = Response()
 	response.data = set_content_type(response, data, path)
 	response.status_code = http_status_code
-	response.headers["X-Page-Name"] = cstr(path.encode("ascii", errors="xmlcharrefreplace"))
+	response.headers["X-Page-Name"] = cstr(cstr(path).encode("ascii", errors="xmlcharrefreplace"))
 	response.headers["X-From-Cache"] = frappe.local.response.from_cache or False
 
-	add_preload_for_bundled_assets(response)
+	if http_status_code != 404:
+		add_preload_for_bundled_assets(response)
 
 	if headers:
 		for key, val in headers.items():
-			response.headers[key] = cstr(val.encode("ascii", errors="xmlcharrefreplace"))
+			response.headers[key] = cstr(cstr(val).encode("utf-8", errors="xmlcharrefreplace"))
 
 	return response
 
@@ -563,8 +590,14 @@ def set_content_type(response, data, path):
 
 def add_preload_for_bundled_assets(response):
 	links = [f"<{css}>; rel=preload; as=style" for css in frappe.local.preload_assets["style"]]
-
 	links.extend(f"<{js}>; rel=preload; as=script" for js in frappe.local.preload_assets["script"])
+
+	version = get_build_version()
+	links.extend(
+		f"<{svg}?v={version}>; rel=preload; as=fetch; crossorigin"
+		for svg in frappe.local.preload_assets["icons"]
+	)
+
 	if links:
 		response.headers["Link"] = ",".join(links)
 
@@ -576,3 +609,9 @@ def is_binary_file(path):
 	with open(path, "rb") as f:
 		content = f.read(1024)
 		return bool(content.translate(None, textchars))
+
+
+def check_if_webform_exists(route):
+	return frappe.db.exists("Web Form", {"name": route.strip("/")}) or frappe.db.exists(
+		"Web Form", {"route": route.strip("/")}
+	)

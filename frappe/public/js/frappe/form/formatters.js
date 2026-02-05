@@ -35,8 +35,12 @@ frappe.form.formatters = {
 	},
 	Data: function (value, df) {
 		if (df && df.options == "URL") {
-			if (!value) return;
+			if (!value) return "";
 			return `<a href="${value}" title="Open Link" target="_blank">${value}</a>`;
+		}
+		if (df && df.options == "IBAN") {
+			if (!value) return "";
+			return frappe.utils.get_formatted_iban(value);
 		}
 		value = value == null ? "" : value;
 
@@ -49,6 +53,10 @@ frappe.form.formatters = {
 		return __(frappe.form.formatters["Data"](value, df));
 	},
 	Float: function (value, docfield, options, doc) {
+		if (value === null) {
+			return "";
+		}
+
 		// don't allow 0 precision for Floats, hence or'ing with null
 		var precision =
 			docfield.precision ||
@@ -73,17 +81,25 @@ frappe.form.formatters = {
 		}
 	},
 	Int: function (value, docfield, options) {
+		if (value === null) {
+			return "";
+		}
+
 		if (cstr(docfield.options).trim() === "File Size") {
 			return frappe.form.formatters.FileSize(value);
 		}
 		return frappe.form.formatters._right(value == null ? "" : cint(value), options);
 	},
 	Percent: function (value, docfield, options) {
+		if (value === null) {
+			return "";
+		}
+
 		const precision =
 			docfield.precision ||
 			cint(frappe.boot.sysdefaults && frappe.boot.sysdefaults.float_precision) ||
 			2;
-		return frappe.form.formatters._right(flt(value, precision) + "%", options);
+		return frappe.form.formatters._right(format_number(value, null, precision) + "%", options);
 	},
 	Rating: function (value, docfield) {
 		let rating_html = "";
@@ -105,6 +121,10 @@ frappe.form.formatters = {
 		</div>`;
 	},
 	Currency: function (value, docfield, options, doc) {
+		if (value === null) {
+			return "";
+		}
+
 		var currency = frappe.meta.get_field_currency(docfield, doc);
 
 		let precision;
@@ -149,6 +169,10 @@ frappe.form.formatters = {
 		var original_value = value;
 		let link_title = frappe.utils.get_link_title(doctype, value);
 
+		if (link_title === value) {
+			link_title = null;
+		}
+
 		if (value && value.match && value.match(/^['"].*['"]$/)) {
 			value.replace(/^.(.*).$/, "$1");
 		}
@@ -171,20 +195,21 @@ frappe.form.formatters = {
 			return value.substring(1, value.length - 1);
 		}
 		if (docfield && docfield.link_onclick) {
-			return repl('<a onclick="%(onclick)s">%(value)s</a>', {
-				onclick: docfield.link_onclick.replace(/"/g, "&quot;"),
+			return repl('<a onclick="%(onclick)s" href="#">%(value)s</a>', {
+				onclick: docfield.link_onclick.replace(/"/g, "&quot;") + "; return false;",
 				value: value,
 			});
 		} else if (docfield && doctype) {
 			if (frappe.model.can_read(doctype)) {
-				return `<a
-					href="/app/${encodeURIComponent(frappe.router.slug(doctype))}/${encodeURIComponent(
-					original_value
-				)}"
-					data-doctype="${doctype}"
-					data-name="${original_value}"
-					data-value="${original_value}">
-					${__((options && options.label) || link_title || value)}</a>`;
+				const a = document.createElement("a");
+				a.href = `/desk/${encodeURIComponent(
+					frappe.router.slug(doctype)
+				)}/${encodeURIComponent(original_value)}`;
+				a.dataset.doctype = doctype;
+				a.dataset.name = original_value;
+				a.dataset.value = original_value;
+				a.innerText = __((options && options.label) || link_title || value);
+				return a.outerHTML;
 			} else {
 				return link_title || value;
 			}
@@ -372,7 +397,7 @@ frappe.form.formatters = {
 	},
 	Icon: (value) => {
 		return value
-			? `<div>
+			? `<div class='flex' style='gap: 8px;'>
 			<div class="selected-icon">${frappe.utils.icon(value, "md")}</div>
 			<span class="icon-value">${value}</span>
 		</div>`
@@ -392,8 +417,14 @@ frappe.form.get_formatter = function (fieldtype) {
 };
 
 frappe.format = function (value, df, options, doc) {
-	if (!df) df = { fieldtype: "Data" };
-	if (df.fieldname == "_user_tags") df.fieldtype = "Tag";
+	let mask_readonly = false;
+	if (df?.parent) {
+		const mask_fields = frappe.get_meta(df.parent)?.masked_fields;
+		mask_readonly = mask_fields?.includes(df.fieldname);
+	}
+
+	if (!df || mask_readonly) df = { fieldtype: "Data" };
+	if (df.fieldname == "_user_tags") df = { ...df, fieldtype: "Tag" };
 	var fieldtype = df.fieldtype || "Data";
 
 	// format Dynamic Link as a Link

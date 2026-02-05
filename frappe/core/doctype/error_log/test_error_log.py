@@ -5,13 +5,11 @@ from unittest.mock import patch
 from ldap3.core.exceptions import LDAPException, LDAPInappropriateAuthenticationResult
 
 import frappe
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase
 from frappe.utils.error import _is_ldap_exception, guess_exception_source
 
-# test_records = frappe.get_test_records('Error Log')
 
-
-class TestErrorLog(FrappeTestCase):
+class TestErrorLog(IntegrationTestCase):
 	def test_error_log(self):
 		"""let's do an error log on error log?"""
 		doc = frappe.new_doc("Error Log")
@@ -52,15 +50,21 @@ _THROW_EXC = """
  frappe.exceptions.ValidationError: what
 """
 
-TEST_EXCEPTIONS = {
-	"erpnext (app)": _RAW_EXC,
-	"erpnext (app)": _THROW_EXC,
-}
+TEST_EXCEPTIONS = (
+	(
+		"erpnext (app)",
+		_RAW_EXC,
+	),
+	(
+		"erpnext (app)",
+		_THROW_EXC,
+	),
+)
 
 
-class TestExceptionSourceGuessing(FrappeTestCase):
+class TestExceptionSourceGuessing(IntegrationTestCase):
 	@patch.object(frappe, "get_installed_apps", return_value=["frappe", "erpnext", "3pa"])
 	def test_exc_source_guessing(self, _installed_apps):
-		for source, exc in TEST_EXCEPTIONS.items():
+		for source, exc in TEST_EXCEPTIONS:
 			result = guess_exception_source(exc)
 			self.assertEqual(result, source)

@@ -1,17 +1,26 @@
 frappe.ui.form.ControlDateRange = class ControlDateRange extends frappe.ui.form.ControlData {
 	make_input() {
 		super.make_input();
-		this.set_date_options();
-		this.set_datepicker();
+		this.make_picker();
 		this.refresh();
 	}
+
+	make_picker() {
+		this.set_date_options();
+		this.set_datepicker();
+	}
+
 	set_date_options() {
 		var me = this;
+
+		let lang = frappe.boot?.user?.language;
 		this.datepicker_options = {
-			language: "en",
+			language: $.fn.datepicker.language[lang] ? lang : "en",
 			range: true,
 			autoClose: true,
 			toggleSelected: false,
+			minDate: this.df.min_date,
+			maxDate: this.df.max_date,
 			firstDay: frappe.datetime.get_first_day_of_the_week_index(),
 		};
 		this.datepicker_options.dateFormat = frappe.boot.sysdefaults.date_format || "yyyy-mm-dd";

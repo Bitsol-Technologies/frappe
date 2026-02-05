@@ -27,7 +27,7 @@ def execute(filters=None):
 	todo_list.sort(
 		key=lambda todo: (
 			priority_map.get(todo.priority, 0),
-			todo.date and getdate(todo.date) or getdate("1900-01-01"),
+			(todo.date and getdate(todo.date)) or getdate("1900-01-01"),
 		),
 		reverse=True,
 	)
@@ -46,7 +46,7 @@ def execute(filters=None):
 	for todo in todo_list:
 		if todo.owner == frappe.session.user or todo.assigned_by == frappe.session.user:
 			if todo.reference_type:
-				todo.reference = """<a href="/app/Form/{}/{}">{}: {}</a>""".format(
+				todo.reference = """<a href="/desk/Form/{}/{}">{}: {}</a>""".format(
 					todo.reference_type,
 					todo.reference_name,
 					todo.reference_type,

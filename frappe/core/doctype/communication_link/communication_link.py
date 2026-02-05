@@ -14,6 +14,7 @@ class CommunicationLink(Document):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
+		communication_date: DF.Datetime | None
 		link_doctype: DF.Link
 		link_name: DF.DynamicLink
 		link_title: DF.ReadOnly | None
@@ -21,8 +22,10 @@ class CommunicationLink(Document):
 		parentfield: DF.Data
 		parenttype: DF.Data
 	# end: auto-generated types
+
 	pass
 
 
 def on_doctype_update():
 	frappe.db.add_index("Communication Link", ["link_doctype", "link_name"])
+	frappe.db.add_index("Communication Link", ["link_doctype", "link_name", "communication_date", "parent"])

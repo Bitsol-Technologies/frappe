@@ -3,9 +3,10 @@
 
 import deep_equal from "fast-deep-equal";
 import number_systems from "./number_systems";
-import cloneDeepWith from "lodash/cloneDeepWith";
 
 frappe.provide("frappe.utils");
+
+const eval_function_cache = new Map();
 
 // Array de duplicate
 if (!Array.prototype.uniqBy) {
@@ -54,6 +55,13 @@ String.prototype.plural = function (revert) {
 		"(octop)us$": "$1i",
 		"(ax|test)is$": "$1es",
 		"(us)$": "$1es",
+		"(f)oot$": "$1eet",
+		"(g)oose$": "$1eese",
+		"(sex)$": "$1es",
+		"(child)$": "$1ren",
+		"(m)an$": "$1en",
+		"(t)ooth$": "$1eeth",
+		"(pe)rson$": "$1ople",
 		"([^s]+)$": "$1s",
 	};
 
@@ -85,18 +93,14 @@ String.prototype.plural = function (revert) {
 		"(h|bl)ouses$": "$1ouse",
 		"(corpse)s$": "$1",
 		"(us)es$": "$1",
+		"(f)eet$": "$1oot",
+		"(g)eese$": "$1oose",
+		"(sex)es$": "$1",
+		"(child)ren$": "$1",
+		"(m)en$": "$1an",
+		"(t)eeth$": "$1ooth",
+		"(pe)ople$": "$1rson",
 		s$: "",
-	};
-
-	const irregular = {
-		move: "moves",
-		foot: "feet",
-		goose: "geese",
-		sex: "sexes",
-		child: "children",
-		man: "men",
-		tooth: "teeth",
-		person: "people",
 	};
 
 	const uncountable = [
@@ -115,29 +119,12 @@ String.prototype.plural = function (revert) {
 	// save some time in the case that singular and plural are the same
 	if (uncountable.indexOf(this.toLowerCase()) >= 0) return this;
 
-	// check for irregular forms
-	let word;
-	let pattern;
-	let replace;
-	for (word in irregular) {
-		if (revert) {
-			pattern = new RegExp(irregular[word] + "$", "i");
-			replace = word;
-		} else {
-			pattern = new RegExp(word + "$", "i");
-			replace = irregular[word];
-		}
-		if (pattern.test(this)) return this.replace(pattern, replace);
-	}
-
-	let array;
-	if (revert) array = singular;
-	else array = plural;
-
 	// check for matches using regular expressions
+	const array = revert ? singular : plural;
+
 	let reg;
 	for (reg in array) {
-		pattern = new RegExp(reg, "i");
+		const pattern = new RegExp(reg, "i");
 
 		if (pattern.test(this)) return this.replace(pattern, array[reg]);
 	}
@@ -171,16 +158,12 @@ Object.assign(frappe.utils, {
 	is_html: function (txt) {
 		if (!txt) return false;
 
-		if (
-			txt.indexOf("<br>") == -1 &&
-			txt.indexOf("<p") == -1 &&
-			txt.indexOf("<img") == -1 &&
-			txt.indexOf("<div") == -1 &&
-			!txt.includes("<span")
-		) {
-			return false;
-		}
-		return true;
+		const doc = new DOMParser().parseFromString(txt, "text/html");
+		const nodes = doc.body.childNodes || [];
+
+		// check if any of the nodes are element nodes
+		// Ref: https://developer.mozilla.org/en-US/docs/Web/API/Node/nodeType
+		return [...nodes].some((node) => node.nodeType === 1);
 	},
 	is_mac: function () {
 		return window.navigator.platform === "MacIntel";
@@ -253,12 +236,11 @@ Object.assign(frappe.utils, {
 			">": "&gt;",
 			'"': "&quot;",
 			"'": "&#39;",
-			"/": "&#x2F;",
 			"`": "&#x60;",
 			"=": "&#x3D;",
 		};
 
-		return String(txt).replace(/[&<>"'`=/]/g, (char) => escape_html_mapping[char] || char);
+		return String(txt).replace(/[&<>"'`=]/g, (char) => escape_html_mapping[char] || char);
 	},
 
 	unescape_html: function (txt) {
@@ -268,13 +250,12 @@ Object.assign(frappe.utils, {
 			"&gt;": ">",
 			"&quot;": '"',
 			"&#39;": "'",
-			"&#x2F;": "/",
 			"&#x60;": "`",
 			"&#x3D;": "=",
 		};
 
 		return String(txt).replace(
-			/&amp;|&lt;|&gt;|&quot;|&#39;|&#x2F;|&#x60;|&#x3D;/g,
+			/&amp;|&lt;|&gt;|&quot;|&#39;|&#x60;|&#x3D;/g,
 			(char) => unescape_html_mapping[char] || char
 		);
 	},
@@ -314,6 +295,9 @@ Object.assign(frappe.utils, {
 				</a></p>'
 			);
 		return content.html();
+	},
+	scroll_page_to_top() {
+		$(".main-section").scrollTop(0);
 	},
 	scroll_to: function (
 		element,
@@ -496,6 +480,7 @@ Object.assign(frappe.utils, {
 		var style = default_style || "default";
 		var colour = "gray";
 		if (text) {
+			text = cstr(text);
 			if (has_words(["Pending", "Review", "Medium", "Not Approved"], text)) {
 				style = "warning";
 				colour = "orange";
@@ -832,6 +817,9 @@ Object.assign(frappe.utils, {
 
 			var audio = $("#sound-" + name)[0];
 			audio.volume = audio.getAttribute("volume");
+			if (!audio.paused) {
+				audio.currentTime = 0;
+			}
 			audio.play();
 		} catch (e) {
 			console.log("Cannot play sound", name, e);
@@ -897,19 +885,40 @@ Object.assign(frappe.utils, {
 		};
 	},
 	debounce: function (func, wait, immediate) {
-		var timeout;
-		return function () {
-			var context = this,
-				args = arguments;
-			var later = function () {
-				timeout = null;
-				if (!immediate) func.apply(context, args);
-			};
+		var timeout, context, args;
+
+		var later = function () {
+			timeout = null;
+			if (!immediate) func.apply(context, args);
+		};
+
+		var debounced = function () {
+			context = this;
+			args = arguments;
 			var callNow = immediate && !timeout;
 			clearTimeout(timeout);
 			timeout = setTimeout(later, wait);
 			if (callNow) func.apply(context, args);
 		};
+
+		debounced.cancel = function () {
+			if (!timeout) return false;
+
+			clearTimeout(timeout);
+			timeout = null;
+			return true;
+		};
+
+		debounced.flush = function () {
+			if (!timeout) return false;
+
+			clearTimeout(timeout);
+			timeout = null;
+			func.apply(context, args);
+			return true;
+		};
+
+		return debounced;
 	},
 	get_form_link: function (
 		doctype,
@@ -920,7 +929,9 @@ Object.assign(frappe.utils, {
 	) {
 		display_text = display_text || name;
 		name = encodeURIComponent(name);
-		let route = `/app/${encodeURIComponent(doctype.toLowerCase().replace(/ /g, "-"))}/${name}`;
+		let route = `/desk/${encodeURIComponent(
+			doctype.toLowerCase().replace(/ /g, "-")
+		)}/${name}`;
 		if (query_params_obj) {
 			route += frappe.utils.make_query_string(query_params_obj);
 		}
@@ -933,18 +944,21 @@ Object.assign(frappe.utils, {
 		let route = route_str.split("/");
 
 		if (route[2] === "Report" || route[0] === "query-report") {
-			return __("{0} Report", [route[3] || route[1]]);
+			return (__(route[3]) || __(route[1])).bold() + " " + __("Report");
 		}
 		if (route[0] === "List") {
-			return __("{0} List", [route[1]]);
+			return __(route[1]).bold() + " " + __("List");
 		}
 		if (route[0] === "modules") {
-			return __("{0} Modules", [route[1]]);
+			return __(route[1]).bold() + " " + __("Module");
+		}
+		if (route[0] === "Workspaces") {
+			return __(route[1]).bold() + " " + __("Workspace");
 		}
 		if (route[0] === "dashboard") {
-			return __("{0} Dashboard", [route[1]]);
+			return __(route[1]).bold() + " " + __("Dashboard");
 		}
-		return __(frappe.utils.to_title_case(route[0], true));
+		return __(frappe.utils.to_title_case(__(route[0]), true));
 	},
 	report_column_total: function (values, column, type) {
 		if (column.column.disable_total) {
@@ -967,25 +981,54 @@ Object.assign(frappe.utils, {
 		const $search_input = $wrapper.find('[data-element="search"]').show();
 		$search_input.focus().val("");
 		const $elements = $wrapper.find(el_class).show();
+		const $multichecks = $wrapper.find('[data-fieldtype="MultiCheck"]');
+
+		let $no_results = $wrapper.find(".no-results-message");
+		if (!$no_results.length) {
+			$no_results = $(`
+				<div class="no-results-message text-muted text-center" style="padding: 5px; display: none;">
+					${__("No values to show")}
+				</div>
+			`).appendTo($wrapper);
+		}
+
+		$no_results.hide();
+
+		const matches_filter = ($el, filter) => {
+			const $text_el = $el.find(text_class);
+			const text = $text_el.text().toLowerCase();
+
+			let name = "";
+			if (data_attr && $text_el.attr(data_attr)) {
+				name = $text_el.attr(data_attr).toLowerCase();
+			}
+
+			return text.includes(filter) || name.includes(filter);
+		};
 
 		$search_input.off("keyup").on("keyup", () => {
-			let text_filter = $search_input.val().toLowerCase();
-			// Replace trailing and leading spaces
-			text_filter = text_filter.replace(/^\s+|\s+$/g, "");
-			for (let i = 0; i < $elements.length; i++) {
-				const text_element = $elements.eq(i).find(text_class);
-				const text = text_element.text().toLowerCase();
+			const text_filter = $search_input.val().toLowerCase().trim();
+			let any_visible = false;
 
-				let name = "";
-				if (data_attr && text_element.attr(data_attr)) {
-					name = text_element.attr(data_attr).toLowerCase();
-				}
+			$elements.each(function () {
+				const match = matches_filter($(this), text_filter);
+				$(this).toggle(match);
+				if (match) any_visible = true;
+			});
 
-				if (text.includes(text_filter) || name.includes(text_filter)) {
-					$elements.eq(i).css("display", "");
-				} else {
-					$elements.eq(i).css("display", "none");
-				}
+			if ($multichecks.length) {
+				$multichecks.show();
+
+				$multichecks.each(function () {
+					const has_visible = $(this).find(el_class + ":visible").length;
+					$(this).toggle(!!has_visible);
+				});
+			}
+
+			if (text_filter) {
+				$no_results.toggle(!any_visible);
+			} else {
+				$no_results.hide();
 			}
 		});
 	},
@@ -1005,10 +1048,6 @@ Object.assign(frappe.utils, {
 
 	deep_equal(a, b) {
 		return deep_equal(a, b);
-	},
-
-	deep_clone(obj, customizer) {
-		return cloneDeepWith(obj, customizer);
 	},
 
 	file_name_ellipsis(filename, length) {
@@ -1039,11 +1078,11 @@ Object.assign(frappe.utils, {
 		}
 		return decoded;
 	},
-	copy_to_clipboard(string) {
+	copy_to_clipboard(string, message) {
 		const show_success_alert = () => {
 			frappe.show_alert({
 				indicator: "green",
-				message: __("Copied to clipboard."),
+				message: message || __("Copied to clipboard."),
 			});
 		};
 		if (navigator.clipboard && window.isSecureContext) {
@@ -1076,14 +1115,38 @@ Object.assign(frappe.utils, {
 	},
 
 	eval(code, context = {}) {
+		if (code.substr(0, 5) == "eval:") {
+			code = code.substr(5);
+		}
+
 		let variable_names = Object.keys(context);
 		let variables = Object.values(context);
-		code = `let out = ${code}; return out`;
+
+		// only cache expressions under 500 chars
+		const should_cache = code.length < 500;
+		const cache_key = should_cache ? code + "|" + variable_names.join(",") : null;
+
+		let expression_function = cache_key && eval_function_cache.get(cache_key);
+
+		if (!expression_function) {
+			const function_code = `let out = ${code}; return out`;
+			try {
+				expression_function = new Function(...variable_names, function_code);
+			} catch (error) {
+				console.log("Error evaluating the following expression:");
+				console.error(function_code);
+				throw error;
+			}
+
+			if (cache_key) {
+				eval_function_cache.set(cache_key, expression_function);
+			}
+		}
+
 		try {
-			let expression_function = new Function(...variable_names, code);
 			return expression_function(...variables);
 		} catch (error) {
-			console.log("Error evaluating the following expression:");
+			console.log("Error executing the following expression:");
 			console.error(code);
 			throw error;
 		}
@@ -1125,7 +1188,7 @@ Object.assign(frappe.utils, {
 		if (value) {
 			let total_duration = frappe.utils.seconds_to_duration(value, duration_options);
 
-			if (total_duration.days) {
+			if (total_duration.days && duration_options.hide_days !== 1) {
 				duration += total_duration.days + __("d", null, "Days (Field: Duration)");
 			}
 			if (total_duration.hours) {
@@ -1136,7 +1199,7 @@ Object.assign(frappe.utils, {
 				duration += duration.length ? " " : "";
 				duration += total_duration.minutes + __("m", null, "Minutes (Field: Duration)");
 			}
-			if (total_duration.seconds) {
+			if (total_duration.seconds && duration_options.hide_seconds !== 1) {
 				duration += duration.length ? " " : "";
 				duration += total_duration.seconds + __("s", null, "Seconds (Field: Duration)");
 			}
@@ -1144,18 +1207,31 @@ Object.assign(frappe.utils, {
 		return duration;
 	},
 
+	get_formatted_iban(value) {
+		if (!value || ["BI", "SV", "EG", "LY"].some((country) => value.startsWith(country))) {
+			return value;
+		}
+
+		return value.replaceAll(" ", "").replace(/(.{4})(?=.)/g, "$1 ");
+	},
+
 	seconds_to_duration(seconds, duration_options) {
-		const round = seconds > 0 ? Math.floor : Math.ceil;
+		const floor = seconds > 0 ? Math.floor : Math.ceil;
 		const total_duration = {
-			days: round(seconds / 86400), // 60 * 60 * 24
-			hours: round((seconds % 86400) / 3600),
-			minutes: round((seconds % 3600) / 60),
-			seconds: round(seconds % 60),
+			days: floor(seconds / 86400), // 60 * 60 * 24
+			hours: floor((seconds % 86400) / 3600),
+			minutes: floor((seconds % 3600) / 60),
+			seconds: floor(seconds % 60),
 		};
 
 		if (duration_options && duration_options.hide_days) {
-			total_duration.hours = round(seconds / 3600);
+			total_duration.hours = floor(seconds / 3600);
 			total_duration.days = 0;
+		}
+
+		if (duration_options && duration_options.hide_seconds) {
+			total_duration.minutes += Math.round(total_duration.seconds / 60);
+			total_duration.seconds = 0;
 		}
 
 		return total_duration;
@@ -1188,6 +1264,8 @@ Object.assign(frappe.utils, {
 	get_number_system: function (country) {
 		if (["Bangladesh", "India", "Myanmar", "Pakistan"].includes(country)) {
 			return number_systems.indian;
+		} else if (country == "Nepal") {
+			return number_systems.nepalese;
 		} else {
 			return number_systems.default;
 		}
@@ -1196,31 +1274,205 @@ Object.assign(frappe.utils, {
 	map_defaults: {
 		center: [19.08, 72.8961],
 		zoom: 13,
-		tiles: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-		options: {
-			attribution:
-				'&copy; <a href="http://osm.org/copyright">OpenStreetMap</a> contributors',
+		tiles: {
+			default_tile: {
+				url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+				options: {
+					attribution:
+						'&copy; <a href="http://osm.org/copyright">OpenStreetMap</a> contributors',
+				},
+			},
+			satellite_tile: {
+				url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+				options: {
+					attribution: "© Esri © OpenStreetMap Contributors",
+				},
+			},
+			labels_tail: {
+				url: "https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}{r}.png",
+				options: {
+					attribution:
+						'&copy; <a href="https://www.stadiamaps.com/" target="_blank">Stadia Maps</a> &copy; <a href="https://www.stamen.com/" target="_blank">Stamen Design</a> &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a>',
+				},
+			},
+			terrain_lines_tail: {
+				url: "https://tiles.stadiamaps.com/tiles/stamen_terrain_lines/{z}/{x}/{y}{r}.png",
+				options: {
+					attribution:
+						'&copy; <a href="https://www.stadiamaps.com/" target="_blank">Stadia Maps</a> &copy; <a href="https://www.stamen.com/" target="_blank">Stamen Design</a> &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a>',
+				},
+			},
 		},
 		image_path: "/assets/frappe/images/leaflet/",
 	},
+	get_route_for_icon(desktop_icon) {
+		let route;
+		if (!desktop_icon) return;
+		let item = {};
+		if (desktop_icon.link_type == "External" && desktop_icon.link) {
+			route = desktop_icon.link;
+		} else {
+			let sidebar = frappe.boot.workspace_sidebar_item[desktop_icon.label.toLowerCase()];
+			if (desktop_icon.link_type == "Workspace Sidebar" && sidebar) {
+				let first_link = sidebar.items.find((i) => i.type == "Link");
+				if (first_link) {
+					if (first_link.link_type === "Report") {
+						let args = {
+							type: first_link.link_type,
+							name: first_link.link_to,
+						};
 
-	icon(icon_name, size = "sm", icon_class = "", icon_style = "", svg_class = "") {
+						if (first_link.report || !frappe.app.sidebar.editor.edit_mode) {
+							args.is_query_report =
+								first_link.report.report_type === "Query Report" ||
+								first_link.report.report_type == "Script Report";
+							args.report_ref_doctype = first_link.report.ref_doctype;
+						}
+
+						route = frappe.utils.generate_route(args);
+					} else if (first_link.link_type == "Workspace") {
+						let workspaces = frappe.workspaces[frappe.router.slug(first_link.link_to)];
+						if (workspaces) {
+							if (workspaces.public) {
+								route = "/desk/" + frappe.router.slug(first_link.link_to);
+							} else {
+								route = "/desk/private/" + frappe.router.slug(workspaces.title);
+							}
+						}
+
+						if (first_link.route) {
+							route = first_link.route;
+						}
+					} else if (first_link.link_type === "URL") {
+						route = first_link.url;
+					} else if (first_link.link_type == "Page" && first_link.route_options) {
+						route = frappe.utils.generate_route({
+							type: first_link.link_type,
+							name: first_link.link_to,
+							route_options: JSON.parse(first_link.route_options),
+						});
+					} else {
+						route = frappe.utils.generate_route({
+							type: first_link.link_type,
+							name: first_link.link_to,
+							tab: first_link.tab,
+						});
+					}
+				}
+			}
+		}
+		return route;
+	},
+	desktop_icon(label, color, size) {
+		let letter = label.charAt(0).toUpperCase();
+		let icon_size = size ? size : "md";
+		let opacity_hex = "1A";
+		let icon_html = $(`
+			<div class="icon-container">
+				<svg fill="currentColor" class="desktop-alphabet icon text-ink-gray-7 icon-${icon_size}" stroke=none style="" aria-hidden="true">
+				<use class="" href="#${letter}"></use>
+				</svg>
+			</div>
+		`);
+		let pallete_color = this.desktop_pallete[color || "blue"];
+		let bg_color = pallete_color + opacity_hex;
+		let stroke_color = pallete_color;
+		if (frappe.boot.desktop_icon_style == "Solid") {
+			bg_color = stroke_color;
+			stroke_color = "var(--white)";
+		}
+		icon_html.css("backgroundColor", bg_color);
+		icon_html.find("svg").css("color", stroke_color);
+		return icon_html.get(0).outerHTML;
+	},
+	desktop_pallete: {
+		blue: "#0981E3",
+		gray: "#7B808A",
+	},
+	icon(
+		icon_name,
+		size = "sm",
+		icon_class = "",
+		icon_style = "",
+		svg_class = "",
+		current_color = false,
+		stroke_color = null
+	) {
+		if (frappe.utils.is_emoji(icon_name)) {
+			return `<span>${icon_name}</span>`;
+		}
 		let size_class = "";
+		let is_espresso = icon_name.startsWith("es-");
 
+		icon_name = is_espresso ? `${"#" + icon_name}` : `${"#icon-" + icon_name}`;
 		if (typeof size == "object") {
 			icon_style += ` width: ${size.width}; height: ${size.height}`;
 		} else {
 			size_class = `icon-${size}`;
 		}
-		return `<svg class="icon ${svg_class} ${size_class}" style="${icon_style}">
-			<use class="${icon_class}" href="#icon-${icon_name}"></use>
+		let $svg = `<svg class="${
+			is_espresso
+				? icon_name.startsWith("es-solid")
+					? "es-icon es-solid"
+					: "es-icon es-line"
+				: "icon"
+		} ${svg_class} ${size_class}"
+			${current_color ? 'stroke="currentColor"' : ""}
+			${stroke_color ? `stroke="${stroke_color}"` : ""}
+			style="${icon_style}" aria-hidden="true">
+			<use class="${icon_class}" href="${icon_name}"
+				${stroke_color ? `stroke="${stroke_color}"` : ""}
+			>
+			</use>
 		</svg>`;
+
+		return $svg;
 	},
 
 	flag(country_code) {
-		return `<img
-		src="https://flagcdn.com/${country_code}.svg"
-		width="20" height="15">`;
+		return `<img loading="lazy" src="https://flagcdn.com/${country_code}.svg" width="20" height="15">`;
+	},
+
+	is_emoji(emoji_name) {
+		let emojiList = gemoji.map((emoji) => emoji.emoji);
+		return emojiList.includes(emoji_name);
+	},
+
+	get_desktop_icon(icon_name, variant) {
+		let exists = false;
+		let icon_data = this.get_desktop_icon_by_label(icon_name);
+		variant = variant.toLowerCase();
+		if (!icon_data?.app) return exists;
+		let app_name = icon_data.app;
+		let icon_url = `assets/${app_name}/icons/desktop_icons/${variant}/${frappe.scrub(
+			icon_name
+		)}.svg`;
+
+		if (
+			frappe.boot.desktop_icon_urls[app_name] &&
+			frappe.boot.desktop_icon_urls[app_name][variant].includes(icon_url)
+		) {
+			return `/${icon_url}`;
+		}
+		return exists;
+	},
+
+	desktop_icon_exists(app_name, url) {
+		let exists = false;
+		if (frappe.boot.desktop_icon_urls[app_name].includes(url)) exists = true;
+		return exists;
+	},
+	get_desktop_icon_by_label(title, filters) {
+		if (!filters) {
+			return frappe.boot.desktop_icons.find((f) => f.label === title);
+		} else {
+			return frappe.boot.desktop_icons.find((f) => {
+				return (
+					f.label === title &&
+					Object.keys(filters).every((key) => f[key] === filters[key])
+				);
+			});
+		}
 	},
 
 	make_chart(wrapper, custom_options = {}) {
@@ -1242,7 +1494,7 @@ Object.assign(frappe.utils, {
 				chart_args[key] = custom_options[key];
 			}
 		}
-
+		frappe.utils.set_space_label_ratio(chart_args);
 		return new frappe.Chart(wrapper, chart_args);
 	},
 
@@ -1250,7 +1502,11 @@ Object.assign(frappe.utils, {
 		const default_country = frappe.sys_defaults.country;
 		return frappe.utils.shorten_number(label, country || default_country, 3);
 	},
-
+	set_space_label_ratio(chart_args) {
+		if (chart_args.data.labels.length > 10) {
+			chart_args["axisOptions"]["seriesLabelSpaceRatio"] = 0.9;
+		}
+	},
 	generate_route(item) {
 		const type = item.type.toLowerCase();
 		if (type === "doctype") {
@@ -1264,7 +1520,7 @@ Object.assign(frappe.utils, {
 				let doctype_slug = frappe.router.slug(item.doctype);
 
 				if (frappe.model.is_single(item.doctype)) {
-					route = doctype_slug;
+					route = `${doctype_slug}/${item.doctype}`;
 				} else {
 					switch (item.doc_view) {
 						case "List":
@@ -1294,17 +1550,24 @@ Object.assign(frappe.utils, {
 								route += `/${item.kanban_board}`;
 							}
 							break;
+						case "Image":
+							route = `${doctype_slug}/view/image`;
+							break;
 						default:
 							route = doctype_slug;
 					}
 				}
+				if (item.tab) {
+					route += `#${item.tab}`;
+				}
 			} else if (type === "report") {
 				if (item.is_query_report) {
 					route = "query-report/" + item.name;
-				} else if (!item.doctype) {
-					route = "/report/" + item.name;
+				} else if (!item.is_query_report && item.report_ref_doctype) {
+					route =
+						frappe.router.slug(item.report_ref_doctype) + "/view/report/" + item.name;
 				} else {
-					route = frappe.router.slug(item.doctype) + "/view/report/" + item.name;
+					route = "report/" + item.name;
 				}
 			} else if (type === "page") {
 				route = item.name;
@@ -1327,7 +1590,7 @@ Object.assign(frappe.utils, {
 		// (item.doctype && frappe.model.can_read(item.doctype))) {
 		//     item.shown = true;
 		// }
-		return `/app/${route}`;
+		return `/desk/${route}`;
 	},
 
 	shorten_number: function (number, country, min_length = 4, max_no_of_decimals = 2) {
@@ -1339,12 +1602,26 @@ Object.assign(frappe.utils, {
 		 *	max_no_of_decimals - max number of decimals of the shortened number
 		 */
 
+		// return empty for null, undefined, or empty string
+		if (!number || isNaN(number)) {
+			return "";
+		}
+
 		// return number if total digits is lesser than min_length
-		const len = String(number).match(/\d/g).length;
-		if (len < min_length) return number.toString();
+		const len = String(number).match(/\d/g)?.length || 0;
+		if (len < min_length) {
+			return number.toString();
+		}
 
 		const number_system = this.get_number_system(country);
 		let x = Math.abs(Math.round(number));
+
+		// if rounding was sufficient to get below min_length, return the rounded number
+		const x_string = x.toString();
+		if (x_string.length < min_length) {
+			return x_string;
+		}
+
 		for (const map of number_system) {
 			if (x >= map.divisor) {
 				let result = number / map.divisor;
@@ -1548,6 +1825,9 @@ Object.assign(frappe.utils, {
 	},
 
 	fetch_link_title(doctype, name) {
+		if (!doctype || !name) {
+			return;
+		}
 		try {
 			return frappe
 				.xcall("frappe.desk.search.get_link_title", {
@@ -1568,7 +1848,7 @@ Object.assign(frappe.utils, {
 	only_allow_num_decimal(input) {
 		input.on("input", (e) => {
 			let self = $(e.target);
-			self.val(self.val().replace(/[^0-9.]/g, ""));
+			self.val(self.val().replace(/[^0-9.\-]/g, ""));
 			if (
 				(e.which != 46 || self.val().indexOf(".") != -1) &&
 				(e.which < 48 || e.which > 57)
@@ -1601,7 +1881,6 @@ Object.assign(frappe.utils, {
 	get_filter_as_json(filters) {
 		// convert filter array to json
 		let filter = null;
-
 		if (filters.length) {
 			filter = {};
 			filters.forEach((arr) => {
@@ -1609,10 +1888,21 @@ Object.assign(frappe.utils, {
 			});
 			filter = JSON.stringify(filter);
 		}
-
 		return filter;
 	},
 
+	process_filter_expression(filter) {
+		let filters = [];
+		filters = filter ? new Function(`return ${filter}`)() : [];
+		return this.cleanup_filters(filters);
+	},
+	cleanup_filters(filters) {
+		if (filters.length && filters[0].length == 5) {
+			filters.pop();
+			return filters;
+		}
+		return filters;
+	},
 	get_filter_from_json(filter_json, doctype) {
 		// convert json to filter array
 		if (filter_json) {
@@ -1620,12 +1910,31 @@ Object.assign(frappe.utils, {
 				return [];
 			}
 
-			const filters_json = new Function(`return ${filter_json}`)();
+			const filters_json = this.process_filter_expression(filter_json);
 			if (!doctype) {
 				// e.g. return {
 				//    priority: (2) ['=', 'Medium'],
 				//    status: (2) ['=', 'Open']
 				// }
+
+				// don't remove unless patch is created to convert all existing filters from object to array
+				// backward compatibility
+				if (Array.isArray(filters_json)) {
+					let filter = filters_json.reduce((acc, filter) => {
+						const field = filter[1];
+						const value = [filter[2], filter[3]];
+
+						// if we have multiple filters for the same field,
+						// we convert it into an array
+						if (acc[field]) {
+							acc[field].push(value);
+						} else {
+							acc[field] = [value];
+						}
+						return acc;
+					}, {});
+					return filter || [];
+				}
 				return filters_json || [];
 			}
 
@@ -1633,6 +1942,11 @@ Object.assign(frappe.utils, {
 			//    ['ToDo', 'status', '=', 'Open', false],
 			//    ['ToDo', 'priority', '=', 'Medium', false]
 			// ]
+			if (Array.isArray(filters_json)) {
+				return filters_json;
+			}
+			// don't remove unless patch is created to convert all existing filters from object to array
+			// backward compatibility
 			return Object.keys(filters_json).map((filter) => {
 				let val = filters_json[filter];
 				return [doctype, filter, val[0], val[1], false];
@@ -1650,9 +1964,6 @@ Object.assign(frappe.utils, {
 
 	debug: {
 		watch_property(obj, prop, callback = console.trace) {
-			if (!frappe.boot.developer_mode) {
-				return;
-			}
 			console.warn("Adding property watcher, make sure to remove it after debugging.");
 
 			// Adapted from https://stackoverflow.com/a/11658693
@@ -1686,7 +1997,10 @@ Object.assign(frappe.utils, {
 				{
 					fieldname: "source",
 					label: __("Source"),
-					fieldtype: "Data",
+					fieldtype: "Link",
+					reqd: 1,
+					options: "UTM Source",
+					description: "The referrer (e.g. google, newsletter)",
 					default: localStorage.getItem("tracker_url:source"),
 				},
 				{
@@ -1694,31 +2008,53 @@ Object.assign(frappe.utils, {
 					label: __("Campaign"),
 					fieldtype: "Link",
 					ignore_link_validation: 1,
-					options: "Marketing Campaign",
+					options: "UTM Campaign",
 					default: localStorage.getItem("tracker_url:campaign"),
 				},
 				{
 					fieldname: "medium",
 					label: __("Medium"),
-					fieldtype: "Data",
+					fieldtype: "Link",
+					options: "UTM Medium",
+					description: "Marketing medium (e.g. cpc, banner, email)",
 					default: localStorage.getItem("tracker_url:medium"),
 				},
+				{
+					fieldname: "content",
+					label: __("Content"),
+					fieldtype: "Data",
+					description: "Use to differentiate ad variants (e.g. A/B testing)",
+					default: localStorage.getItem("tracker_url:content"),
+				},
 			],
-			function (data) {
+			async function (data) {
 				let url = data.url;
 				localStorage.setItem("tracker_url:url", data.url);
 
-				if (data.source) {
-					url += "?source=" + data.source;
-					localStorage.setItem("tracker_url:source", data.source);
-				}
+				const { message } = await frappe.db.get_value("UTM Source", data.source, "slug");
+				url += "?utm_source=" + encodeURIComponent(message.slug || data.source);
+				localStorage.setItem("tracker_url:source", data.source);
 				if (data.campaign) {
-					url += "&campaign=" + data.campaign;
+					const { message } = await frappe.db.get_value(
+						"UTM Campaign",
+						data.campaign,
+						"slug"
+					);
+					url += "&utm_campaign=" + encodeURIComponent(message.slug || data.campaign);
 					localStorage.setItem("tracker_url:campaign", data.campaign);
 				}
 				if (data.medium) {
-					url += "&medium=" + data.medium.toLowerCase();
+					const { message } = await frappe.db.get_value(
+						"UTM Medium",
+						data.medium,
+						"slug"
+					);
+					url += "&utm_medium=" + encodeURIComponent(message.slug || data.medium);
 					localStorage.setItem("tracker_url:medium", data.medium);
+				}
+				if (data.content) {
+					url += "&utm_content=" + encodeURIComponent(data.content);
+					localStorage.setItem("tracker_url:content", data.content);
 				}
 
 				frappe.utils.copy_to_clipboard(url);
@@ -1732,5 +2068,119 @@ Object.assign(frappe.utils, {
 			},
 			__("Generate Tracking URL")
 		);
+	},
+	/**
+	 * Checks if a value is empty.
+	 *
+	 * Returns false for: "hello", 0, 1, 3.1415, {"a": 1}, [1, 2, 3]
+	 * Returns true for: "", null, undefined, {}, []
+	 *
+	 * @param {*} value - The value to check.
+	 * @returns {boolean} - Returns `true` if the value is empty, `false` otherwise.
+	 */
+	is_empty(value) {
+		if (!value && value !== 0) return true;
+
+		if (typeof value === "object")
+			return (Array.isArray(value) ? value : Object.keys(value)).length === 0;
+
+		return false;
+	},
+
+	/**
+	 * Masks passwords in an object by replacing the values of keys containing
+	 * "password" or "passphrase" with "*****".
+	 *
+	 * @param {Object} obj - The object to mask passwords in.
+	 */
+	mask_passwords(obj) {
+		const KEYWORDS_TO_MASK = ["password", "passphrase"];
+		for (const key of Object.keys(obj)) {
+			if (KEYWORDS_TO_MASK.some((keyword) => key.includes(keyword)) && obj[key]) {
+				obj[key] = "*****";
+			}
+		}
+	},
+
+	/**
+	 * Adds syntax highlighting to all <pre> tags in the given jQuery wrapper.
+	 * Example wrapper:
+	 *
+	 * ```html
+	 * <pre><code class="language-python">
+	 * def add(a, b):
+	 *     return a + b
+	 *
+	 * print(add(1, 2))
+	 *
+	 * # Output: 3
+	 * </code></pre>
+	 * ```
+	 *
+	 * @param {jQuery} $wrapper - The jQuery wrapper to add syntax highlighting to.
+	 */
+	highlight_pre($wrapper) {
+		frappe.require("syntax_highlighting.bundle.js").then(() => {
+			$wrapper.find("pre").each(function () {
+				hljs.highlightElement(this);
+			});
+		});
+	},
+
+	/**
+	 * Check if current user can upload public files.
+	 * @returns {boolean}
+	 */
+	can_upload_public_files() {
+		if (
+			Number(frappe.boot.sysdefaults?.only_allow_system_managers_to_upload_public_files) !==
+			1
+		) {
+			return true;
+		}
+		return frappe.user.has_role(["System Manager", "Administrator"]);
+	},
+
+	get_help_siblings() {
+		const navbar_settings = frappe.boot.navbar_settings;
+		let help_dropdown_items = [];
+
+		let custom_help_links = this.get_custom_help_links();
+
+		help_dropdown_items = custom_help_links.concat(help_dropdown_items);
+
+		navbar_settings.help_dropdown.forEach((element) => {
+			let dropdown_children = {
+				name: element.name,
+				label: element.item_label,
+			};
+			if (element.item_type === "Route") {
+				dropdown_children.url = element.route;
+			}
+			if (element.item_type === "Action") {
+				dropdown_children.onClick = function () {
+					frappe.utils.eval(element.action);
+				};
+			}
+			help_dropdown_items.push(dropdown_children);
+		});
+
+		return help_dropdown_items;
+	},
+	get_custom_help_links() {
+		let route = frappe.get_route_str();
+		let breadcrumbs = route.split("/");
+
+		let links = [];
+		for (let i = 0; i < breadcrumbs.length; i++) {
+			let r = route.split("/", i + 1);
+			let key = r.join("/");
+			let help_links = frappe.help.help_links[key] || [];
+			links = $.merge(links, help_links);
+		}
+		if (links.length) {
+			links.push({ is_divider: true });
+		}
+		return links;
 	},
 });

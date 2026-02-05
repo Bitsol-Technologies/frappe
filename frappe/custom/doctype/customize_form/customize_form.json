@@ -7,10 +7,14 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
+  "details_tab",
   "doc_type",
   "properties",
   "label",
   "search_fields",
+  "grid_page_length",
+  "rows_threshold_for_grid_search",
+  "link_filters",
   "column_break_5",
   "istable",
   "is_calendar_and_gantt",
@@ -24,23 +28,13 @@
   "naming_section",
   "naming_rule",
   "autoname",
-  "document_actions_section",
-  "actions",
-  "document_links_section",
-  "links",
-  "document_states_section",
-  "states",
-  "form_tab",
-  "form_builder",
-  "fields_section_break",
-  "fields",
-  "settings_tab",
   "form_settings_section",
   "image_field",
   "max_attachments",
   "column_break_21",
   "allow_copy",
   "make_attachments_public",
+  "protect_attached_files",
   "view_settings_section",
   "title_field",
   "show_title_field_in_link",
@@ -50,16 +44,29 @@
   "force_re_route_to_default_view",
   "column_break_29",
   "show_preview_popup",
+  "show_name_in_global_search",
   "email_settings_section",
   "default_email_template",
   "column_break_26",
   "email_append_to",
   "sender_field",
+  "sender_name_field",
+  "recipient_account_field",
   "subject_field",
   "section_break_8",
   "sort_field",
   "column_break_10",
-  "sort_order"
+  "sort_order",
+  "document_actions_section",
+  "actions",
+  "document_links_section",
+  "links",
+  "document_states_section",
+  "states",
+  "fields_section_break",
+  "fields",
+  "form_tab",
+  "form_builder"
  ],
  "fields": [
   {
@@ -218,7 +225,7 @@
    "depends_on": "email_append_to",
    "fieldname": "sender_field",
    "fieldtype": "Data",
-   "label": "Sender Field",
+   "label": "Sender Email Field",
    "mandatory_depends_on": "email_append_to"
   },
   {
@@ -347,9 +354,10 @@
   },
   {
    "default": "0",
+   "description": "Enabling this will submit documents in background",
    "fieldname": "queue_in_background",
    "fieldtype": "Check",
-   "label": "Queue in Background"
+   "label": "Queue in Background (BETA)"
   },
   {
    "fieldname": "default_view",
@@ -371,11 +379,6 @@
    "label": "Is Calendar and Gantt"
   },
   {
-   "fieldname": "settings_tab",
-   "fieldtype": "Tab Break",
-   "label": "Settings"
-  },
-  {
    "fieldname": "form_builder",
    "fieldtype": "HTML",
    "label": "Form Builder"
@@ -384,6 +387,56 @@
    "fieldname": "form_tab",
    "fieldtype": "Tab Break",
    "label": "Form"
+  },
+  {
+   "fieldname": "link_filters",
+   "fieldtype": "JSON",
+   "hidden": 1,
+   "label": "Link Filters"
+  },
+  {
+   "fieldname": "details_tab",
+   "fieldtype": "Tab Break",
+   "label": "Details"
+  },
+  {
+   "depends_on": "email_append_to",
+   "fieldname": "sender_name_field",
+   "fieldtype": "Data",
+   "label": "Sender Name Field"
+  },
+  {
+   "depends_on": "istable",
+   "fieldname": "grid_page_length",
+   "fieldtype": "Int",
+   "label": "Grid Page Length",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "description": "Users are only able to delete attached files if the document is either in draft or if the document is canceled and they are also able to delete the document.",
+   "fieldname": "protect_attached_files",
+   "fieldtype": "Check",
+   "label": "Protect Attached Files"
+  },
+  {
+   "depends_on": "email_append_to",
+   "fieldname": "recipient_account_field",
+   "fieldtype": "Data",
+   "label": "Recipient Account Field"
+  },
+  {
+   "depends_on": "istable",
+   "fieldname": "rows_threshold_for_grid_search",
+   "fieldtype": "Int",
+   "label": "Rows Threshold for Grid Search",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "show_name_in_global_search",
+   "fieldtype": "Check",
+   "label": "Make \"name\" searchable in Global Search"
   }
  ],
  "hide_toolbar": 1,
@@ -392,7 +445,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2023-07-16 13:25:46.201184",
+ "modified": "2025-09-23 07:13:52.631903",
  "modified_by": "Administrator",
  "module": "Custom",
  "name": "Customize Form",
@@ -410,8 +463,9 @@
   }
  ],
  "quick_entry": 1,
+ "row_format": "Dynamic",
  "search_fields": "doc_type",
- "sort_field": "modified",
+ "sort_field": "creation",
  "sort_order": "DESC",
  "states": [],
  "track_changes": 1

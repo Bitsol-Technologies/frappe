@@ -112,7 +112,7 @@ export default class Block {
 				});
 				this.block_widget.customize(this.options);
 				this.wrapper.setAttribute(block_name, this.block_widget.label);
-				$(this.wrapper).find(".widget").addClass(`${widget_type} edit-mode`);
+				$(this.wrapper).find(".widget").addClass(`${widget_type}`);
 				this.new_block_widget = this.block_widget.get_config();
 				this.add_settings_button();
 			},
@@ -185,6 +185,12 @@ export default class Block {
 				title: "Move Down",
 				icon: frappe.utils.icon("down-arrow", "sm"),
 				action: () => this.move_block("down"),
+			},
+			{
+				label: "Duplicate",
+				title: "Duplicate",
+				icon: frappe.utils.icon("copy", "sm"),
+				action: () => this.duplicate_block(),
 			},
 		];
 
@@ -336,5 +342,18 @@ export default class Block {
 		let current_index = this.api.blocks.getCurrentBlockIndex();
 		let new_index = current_index + (direction == "down" ? 1 : -1);
 		this.api.blocks.move(new_index, current_index);
+	}
+
+	duplicate_block() {
+		const current_block_index = this.api.blocks.getCurrentBlockIndex();
+		const current_block = this.api.blocks.getBlockByIndex(current_block_index);
+
+		if (!current_block) return;
+
+		const type = current_block.name;
+		const data = this.data;
+
+		this.api.blocks.insert(type, data, null, current_block_index + 1, true);
+		this.api.caret.setToBlock(current_block_index + 1, "end");
 	}
 }

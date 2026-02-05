@@ -12,6 +12,7 @@ class EventParticipants(Document):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
+		attending: DF.Literal["", "Yes", "No", "Maybe"]
 		email: DF.Data | None
 		parent: DF.Data
 		parentfield: DF.Data
@@ -19,4 +20,5 @@ class EventParticipants(Document):
 		reference_docname: DF.DynamicLink
 		reference_doctype: DF.Link
 	# end: auto-generated types
+
 	pass

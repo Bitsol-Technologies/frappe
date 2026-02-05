@@ -17,6 +17,8 @@ export default class GridRowForm {
 			grid: this.row.grid,
 			grid_row: this.row,
 			grid_row_form: this,
+			is_child_table: true,
+			doctype: this.row.grid.doctype,
 		});
 		this.layout.make();
 
@@ -58,7 +60,7 @@ export default class GridRowForm {
 						<button class="btn btn-secondary btn-sm pull-right grid-insert-row-below hidden-xs">
 							${__("Insert Below")}</button>
 						<button class="btn btn-danger btn-sm pull-right grid-delete-row">
-							${frappe.utils.icon("delete")}
+							${frappe.utils.icon("trash-2")} ${__("Delete")}
 						</button>
 					</span>
 				</div>
@@ -71,9 +73,11 @@ export default class GridRowForm {
 						<span class="text-medium"> ${__("Shortcuts")}: </span>
 						<kbd>${__("Ctrl + Up")}</kbd> . <kbd>${__("Ctrl + Down")}</kbd> . <kbd>${__("ESC")}</kbd>
 					</div>
-					<button class="btn btn-secondary btn-sm pull-right grid-append-row">
-						${__("Insert Below")}
-					</button>
+					<span class="row-actions">
+						<button class="btn btn-secondary btn-sm pull-right grid-append-row">
+							${__("Insert Below")}
+						</button>
+					</span>
 				</div>
 			</div>`;
 
@@ -126,6 +130,22 @@ export default class GridRowForm {
 		field.refresh();
 		this.layout && this.layout.refresh_dependency();
 	}
+	set_active_tab(tab) {
+		// Store the active tab for this grid row form
+		this.active_tab = tab;
+
+		// When switching tabs in grid row forms, update field display for Geolocation/Signature fields
+		// This is similar to the fix in frappe/frappe#27441 for regular forms
+		let in_tab = false;
+		for (const df of this.layout.fields) {
+			const field = this.fields_dict[df.fieldname];
+			if (df?.fieldtype === "Tab Break") {
+				in_tab = df === tab?.df;
+			} else if (typeof field?.on_section_collapse === "function") {
+				field.on_section_collapse(!in_tab);
+			}
+		}
+	}
 	set_focus() {
 		// wait for animation and then focus on the first row
 		var me = this;
@@ -134,7 +154,7 @@ export default class GridRowForm {
 				var first = me.form_area.find("input:first");
 				if (
 					first.length &&
-					!in_list(["Date", "Datetime", "Time"], first.attr("data-fieldtype"))
+					!["Date", "Datetime", "Time"].includes(first.attr("data-fieldtype"))
 				) {
 					try {
 						first.get(0).focus();

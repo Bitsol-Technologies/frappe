@@ -3,8 +3,7 @@ from unittest.mock import mock_open, patch
 
 import frappe
 from frappe.modules import patch_handler
-from frappe.tests.utils import FrappeTestCase
-from frappe.utils import get_bench_path
+from frappe.tests import IntegrationTestCase
 
 EMTPY_FILE = ""
 EMTPY_SECTION = """
@@ -49,7 +48,7 @@ app.module.patch4
 """
 
 
-class TestPatches(FrappeTestCase):
+class TestPatches(IntegrationTestCase):
 	def test_patch_module_names(self):
 		frappe.flags.final_patches = []
 		frappe.flags.in_install = True
@@ -79,7 +78,7 @@ class TestPatches(FrappeTestCase):
 		self.assertGreaterEqual(finished_patches, len(all_patches))
 
 
-class TestPatchReader(FrappeTestCase):
+class TestPatchReader(IntegrationTestCase):
 	def get_patches(self):
 		return (
 			patch_handler.get_patches_from_app("frappe"),
@@ -122,7 +121,7 @@ class TestPatchReader(FrappeTestCase):
 
 	@patch("builtins.open", new_callable=mock_open, read_data=EDGE_CASES)
 	def test_new_style_edge_cases(self, _file):
-		all, pre, post = self.get_patches()
+		_all, pre, _post = self.get_patches()
 		self.assertEqual(
 			pre,
 			[
@@ -135,7 +134,7 @@ class TestPatchReader(FrappeTestCase):
 
 	@patch("builtins.open", new_callable=mock_open, read_data=COMMENTED_OUT)
 	def test_ignore_comments(self, _file):
-		all, pre, post = self.get_patches()
+		_all, pre, _post = self.get_patches()
 		self.assertEqual(pre, ["app.module.patch1", "app.module.patch3"])
 
 	def test_verify_patch_txt(self):
@@ -165,13 +164,13 @@ def check_patch_files(app):
 			missing_patches.append(module)
 
 	if missing_patches:
-		raise Exception(f"Patches missing in patch.txt: \n" + "\n".join(missing_patches))
+		raise Exception("Patches missing in patch.txt: \n" + "\n".join(missing_patches))
 
 
 def _get_dotted_path(file: Path, app) -> str:
-	app_path = Path(get_bench_path()) / "apps" / app
+	app_path = Path(frappe.get_app_path(app))
 
 	*path, filename = file.relative_to(app_path).parts
 	base_filename = Path(filename).stem
 
-	return ".".join(path + [base_filename])
+	return ".".join([app, *path, base_filename])

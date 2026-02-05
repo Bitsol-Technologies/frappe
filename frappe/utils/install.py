@@ -3,7 +3,9 @@
 import getpass
 
 import frappe
+from frappe.email.doctype.notification.notification import install_notification_templates
 from frappe.geo.doctype.country.country import import_country_and_currency
+from frappe.utils import cint
 from frappe.utils.password import update_password
 
 
@@ -16,6 +18,7 @@ def before_install():
 	frappe.reload_doc("desk", "doctype", "form_tour_step")
 	frappe.reload_doc("desk", "doctype", "form_tour")
 	frappe.reload_doc("core", "doctype", "doctype")
+	frappe.clear_cache()
 
 
 def after_install():
@@ -43,13 +46,16 @@ def after_install():
 		# only set home_page if the value doesn't exist in the db
 		if not frappe.db.get_default("desktop:home_page"):
 			frappe.db.set_default("desktop:home_page", "setup-wizard")
-			frappe.db.set_single_value("System Settings", "setup_complete", 0)
 
 	# clear test log
-	with open(frappe.get_site_path(".test_log"), "w") as f:
-		f.write("")
+	from frappe.tests.utils.generators import _clear_test_log
+
+	_clear_test_log()
 
 	add_standard_navbar_items()
+
+	# default templates
+	install_notification_templates()
 
 	frappe.db.commit()
 
@@ -87,8 +93,6 @@ def install_basic_docs():
 			"thread_notify": 0,
 			"send_me_a_copy": 0,
 		},
-		{"doctype": "Role", "role_name": "Report Manager"},
-		{"doctype": "Role", "role_name": "Translator"},
 		{
 			"doctype": "Workflow State",
 			"workflow_state_name": "Pending",
@@ -110,27 +114,6 @@ def install_basic_docs():
 		{"doctype": "Workflow Action Master", "workflow_action_name": "Approve"},
 		{"doctype": "Workflow Action Master", "workflow_action_name": "Reject"},
 		{"doctype": "Workflow Action Master", "workflow_action_name": "Review"},
-		{
-			"doctype": "Email Domain",
-			"domain_name": "example.com",
-			"email_id": "account@example.com",
-			"password": "pass",
-			"email_server": "imap.example.com",
-			"use_imap": 1,
-			"smtp_server": "smtp.example.com",
-		},
-		{
-			"doctype": "Email Account",
-			"domain": "example.com",
-			"email_id": "notifications@example.com",
-			"default_outgoing": 1,
-		},
-		{
-			"doctype": "Email Account",
-			"domain": "example.com",
-			"email_id": "replies@example.com",
-			"default_incoming": 1,
-		},
 	]
 
 	for d in install_docs:
@@ -141,18 +124,7 @@ def install_basic_docs():
 
 
 def get_admin_password():
-	def ask_admin_password():
-		admin_password = getpass.getpass("Set Administrator password: ")
-		admin_password2 = getpass.getpass("Re-enter Administrator password: ")
-		if not admin_password == admin_password2:
-			print("\nPasswords do not match")
-			return ask_admin_password()
-		return admin_password
-
-	admin_password = frappe.conf.get("admin_password")
-	if not admin_password:
-		return ask_admin_password()
-	return admin_password
+	return frappe.conf.get("admin_password") or getpass.getpass("Set Administrator password: ")
 
 
 def before_tests():
@@ -166,7 +138,7 @@ def before_tests():
 	frappe.clear_cache()
 
 	# complete setup if missing
-	if not int(frappe.db.get_single_value("System Settings", "setup_complete") or 0):
+	if not frappe.is_setup_complete():
 		complete_setup_wizard()
 
 	frappe.db.set_single_value("Website Settings", "disable_signup", 0)
@@ -186,6 +158,7 @@ def complete_setup_wizard():
 			"country": "United States",
 			"timezone": "America/New_York",
 			"currency": "USD",
+			"enable_telemtry": 1,
 		}
 	)
 
@@ -197,90 +170,58 @@ def add_standard_navbar_items():
 	if navbar_settings.settings_dropdown and navbar_settings.help_dropdown:
 		return
 
-	standard_navbar_items = [
-		{
-			"item_label": "My Profile",
-			"item_type": "Route",
-			"route": "/app/user-profile",
-			"is_standard": 1,
-		},
-		{
-			"item_label": "My Settings",
-			"item_type": "Action",
-			"action": "frappe.ui.toolbar.route_to_user()",
-			"is_standard": 1,
-		},
-		{
-			"item_label": "Session Defaults",
-			"item_type": "Action",
-			"action": "frappe.ui.toolbar.setup_session_defaults()",
-			"is_standard": 1,
-		},
-		{
-			"item_label": "Reload",
-			"item_type": "Action",
-			"action": "frappe.ui.toolbar.clear_cache()",
-			"is_standard": 1,
-		},
-		{
-			"item_label": "View Website",
-			"item_type": "Action",
-			"action": "frappe.ui.toolbar.view_website()",
-			"is_standard": 1,
-		},
-		{
-			"item_label": "Toggle Full Width",
-			"item_type": "Action",
-			"action": "frappe.ui.toolbar.toggle_full_width()",
-			"is_standard": 1,
-		},
-		{
-			"item_label": "Toggle Theme",
-			"item_type": "Action",
-			"action": "new frappe.ui.ThemeSwitcher().show()",
-			"is_standard": 1,
-		},
-		{
-			"item_type": "Separator",
-			"is_standard": 1,
-			"item_label": "",
-		},
-		{
-			"item_label": "Log out",
-			"item_type": "Action",
-			"action": "frappe.app.logout()",
-			"is_standard": 1,
-		},
-	]
-
-	standard_help_items = [
-		{
-			"item_label": "About",
-			"item_type": "Action",
-			"action": "frappe.ui.toolbar.show_about()",
-			"is_standard": 1,
-		},
-		{
-			"item_label": "Keyboard Shortcuts",
-			"item_type": "Action",
-			"action": "frappe.ui.toolbar.show_shortcuts(event)",
-			"is_standard": 1,
-		},
-		{
-			"item_label": "Frappe Support",
-			"item_type": "Route",
-			"route": "https://frappe.io/support",
-			"is_standard": 1,
-		},
-	]
-
 	navbar_settings.settings_dropdown = []
 	navbar_settings.help_dropdown = []
 
-	for item in standard_navbar_items:
+	for item in frappe.get_hooks("standard_navbar_items"):
 		navbar_settings.append("settings_dropdown", item)
 
-	for item in standard_help_items:
+	for item in frappe.get_hooks("standard_help_items"):
 		navbar_settings.append("help_dropdown", item)
 
 	navbar_settings.save()
+
+
+def auto_generate_icons_and_sidebar(app_name=None):
+	"""Auto Create desktop icons and workspace sidebars."""
+	from frappe.desk.doctype.desktop_icon.desktop_icon import create_desktop_icons
+	from frappe.desk.doctype.workspace_sidebar.workspace_sidebar import (
+		create_workspace_sidebar_for_workspaces,
+	)
+
+	try:
+		print("Creating Workspace Sidebars")
+		create_workspace_sidebar_for_workspaces()
+		print("Creating Desktop Icons")
+		create_desktop_icons()
+		# Save the generated icons
+		frappe.db.commit()  # nosemgrep
+		# Save the genreated sidebar links
+		frappe.db.commit()  # nosemgrep
+	except Exception as e:
+		print(f"Error creating icons {e}")
+
+
+def delete_desktop_icon_and_sidebar(app_name, dry_run=False):
+	frappe.get_hooks(app_name=app_name)
+	app_title = frappe.get_hooks(app_name=app_name)["app_title"][0]
+	icons_to_be_deleted = frappe.get_all(
+		"Desktop Icon",
+		pluck="name",
+		or_filters=[
+			["Desktop Icon", "name", "=", app_title],
+			["Desktop Icon", "parent_icon", "=", app_title],
+		],
+	)
+	print("Deleting Desktop Icons")
+	for icon in icons_to_be_deleted:
+		frappe.delete_doc_if_exists("Desktop Icon", icon)
+	# Delete icons
+	sidebar_to_be_deleted = frappe.get_all("Workspace Sidebar", pluck="name", filters={"app": app_name})
+	print("Deleting Workspace Sidebars")
+	for icon in sidebar_to_be_deleted:
+		frappe.delete_doc_if_exists("Workspace Sidebar", icon)
+
+	if dry_run:
+		# Delete icons and sidebars
+		frappe.db.commit()  # nosemgrep

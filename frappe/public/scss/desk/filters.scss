@@ -1,12 +1,13 @@
 .filter-icon.active {
-	--icon-stroke: var(--text-on-blue);
+	--icon-stroke: var(--primary);
 }
 
 .filter-popover {
 	min-width: 500px;
 	min-height: 50px;
-	font-size: var(--text-md);
+	@include get_textstyle("base", "regular");
 	z-index: 1019;
+	border: 1px solid var(--border-color);
 }
 
 .filter-area {
@@ -30,16 +31,17 @@
 		}
 
 		.awesomplete {
-			ul[role="listbox"] {
+			& > ul,
+			& > [role="listbox"] {
 				min-width: 100%;
 				width: auto;
 
-				li {
+				& > li,
+				& > [role="option"] {
 					max-width: 300px;
 				}
 			}
 		}
-
 	}
 
 	.empty-filters {
@@ -92,7 +94,7 @@
 			}
 
 			.remove-filter {
-				font-size: var(--text-sm);
+				@include get_textstyle("sm", "regular");
 				color: var(--primary);
 			}
 
@@ -104,3 +106,24 @@
 	}
 }
 
+.input-group > .form-control:not(:last-child) {
+	border-top-right-radius: 0 !important;
+	border-bottom-right-radius: 0 !important;
+	margin-right: 0px !important;
+}
+
+.match-type-dropdown-btn {
+	border-top-left-radius: 0 !important;
+	border-bottom-left-radius: 0 !important;
+	height: var(--btn-height);
+	border-left: 1px solid var(--btn-group-border-color);
+	display: flex;
+	align-items: center;
+
+	&:focus {
+		box-shadow: none !important;
+	}
+}
+.match-type-dropdown-menu {
+	min-width: 100px;
+}

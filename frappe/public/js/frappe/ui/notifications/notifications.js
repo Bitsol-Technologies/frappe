@@ -1,20 +1,25 @@
 frappe.provide("frappe.search");
 
 frappe.ui.Notifications = class Notifications {
-	constructor() {
+	constructor(opts) {
 		this.tabs = {};
 		this.notification_settings = frappe.boot.notification_settings;
+		this.full_height = opts?.full_height || true;
+		this.full_height = opts?.full_height || false;
+		this.wrapper = opts?.wrapper || $(".standard-items-sections");
 		this.make();
 	}
 
 	make() {
-		this.dropdown = $(".navbar").find(".dropdown-notifications").removeClass("hidden");
+		this.wrapper.find(".sidebar-notification").removeClass("hidden");
+		this.dropdown = this.wrapper.find(".dropdown-notifications");
 		this.dropdown_list = this.dropdown.find(".notifications-list");
 		this.header_items = this.dropdown_list.find(".header-items");
 		this.header_actions = this.dropdown_list.find(".header-actions");
 		this.body = this.dropdown_list.find(".notification-list-body");
 		this.panel_events = this.dropdown_list.find(".panel-events");
 		this.panel_notifications = this.dropdown_list.find(".panel-notifications");
+		this.panel_changelog_feed = this.dropdown_list.find(".panel-changelog-feed");
 
 		this.user = frappe.session.user;
 
@@ -24,24 +29,36 @@ frappe.ui.Notifications = class Notifications {
 
 	setup_headers() {
 		// Add header actions
-		$(`<span class="notification-settings pull-right" data-action="go_to_settings">
+		$(`<span class="notification-settings" data-action="go_to_settings">
 			${frappe.utils.icon("setting-gear")}
 		</span>`)
 			.on("click", (e) => {
 				e.stopImmediatePropagation();
-				this.dropdown.dropdown("hide");
+				console.log("what");
 				frappe.set_route("Form", "Notification Settings", frappe.session.user);
 			})
 			.appendTo(this.header_actions)
 			.attr("title", __("Notification Settings"))
 			.tooltip({ delay: { show: 600, hide: 100 }, trigger: "hover" });
 
-		$(`<span class="mark-all-read pull-right" data-action="mark_all_as_read">
+		$(`<span class="mark-all-read" data-action="mark_all_as_read">
 			${frappe.utils.icon("mark-as-read")}
 		</span>`)
 			.on("click", (e) => this.mark_all_as_read(e))
 			.appendTo(this.header_actions)
 			.attr("title", __("Mark all as read"))
+			.tooltip({ delay: { show: 600, hide: 100 }, trigger: "hover" });
+
+		$(`<span class="close-notification-dialogue pull-right">
+			${frappe.utils.icon("x")}
+		</span>`)
+			.on("click", (e) => {
+				if (!this.full_height) {
+					this.dropdown.addClass("hidden");
+				}
+			})
+			.appendTo(this.header_actions)
+			.attr("title", __("Close"))
 			.tooltip({ delay: { show: 600, hide: 100 }, trigger: "hover" });
 
 		this.categories = [
@@ -52,10 +69,16 @@ frappe.ui.Notifications = class Notifications {
 				el: this.panel_notifications,
 			},
 			{
-				label: __("Today's Events"),
+				label: __("Events"),
 				id: "todays_events",
 				view: EventsView,
 				el: this.panel_events,
+			},
+			{
+				label: __("What's New"),
+				id: "changelog_feed",
+				view: ChangelogFeedView,
+				el: this.panel_changelog_feed,
 			},
 		];
 
@@ -111,6 +134,8 @@ frappe.ui.Notifications = class Notifications {
 	}
 
 	setup_dropdown_events() {
+		const dropdown = this.dropdown;
+		const full_height = this.full_height;
 		this.dropdown.on("hide.bs.dropdown", (e) => {
 			let hide = $(e.currentTarget).data("closable");
 			$(e.currentTarget).data("closable", true);
@@ -119,6 +144,26 @@ frappe.ui.Notifications = class Notifications {
 
 		this.dropdown.on("click", (e) => {
 			$(e.currentTarget).data("closable", true);
+		});
+
+		$(document).on("click", function (e) {
+			const isInsideNotificationBtn =
+				$(e.target).closest(".standard-items-sections .sidebar-notification").length > 0;
+			const isInsideDropdown = $(e.target).closest(".notifications-list").length > 0;
+			if (!isInsideNotificationBtn && !isInsideDropdown) {
+				if (full_height) {
+					dropdown.addClass("hidden");
+				}
+			}
+		});
+
+		dropdown.find(".notification-item").on("click", (e) => {
+			dropdown.addClass("hidden");
+		});
+		$(document).on("page-change", function () {
+			if (dropdown && dropdown.length) {
+				dropdown.addClass("hidden");
+			}
 		});
 	}
 };
@@ -211,7 +256,7 @@ class NotificationsView extends BaseNotificationsView {
 		if (this.container.find(".activity-status")) {
 			this.container.find(".activity-status").replaceWith(
 				`<a class="recent-item text-center text-muted"
-					href="/app/List/Notification Log">
+					href="/desk/List/Notification Log">
 					<div class="full-log-btn">${__("View Full Log")}</div>
 				</a>`
 			);
@@ -300,7 +345,7 @@ class NotificationsView extends BaseNotificationsView {
 					this.container.append(this.get_dropdown_item_html(notification_log));
 				});
 				this.container.append(`<a class="list-footer"
-					href="/app/List/Notification Log">
+					href="/desk/List/Notification Log">
 						<div class="full-log-btn">${__("See all Activity")}</div>
 					</a>`);
 			} else {
@@ -318,13 +363,18 @@ class NotificationsView extends BaseNotificationsView {
 	}
 
 	get_notifications_list(limit) {
-		return frappe.call(
-			"frappe.desk.doctype.notification_log.notification_log.get_notification_logs",
-			{ limit: limit }
-		);
+		return frappe.call({
+			method: "frappe.desk.doctype.notification_log.notification_log.get_notification_logs",
+			args: { limit: limit },
+			type: "GET",
+			cache: true,
+		});
 	}
 
 	get_item_link(notification_doc) {
+		if (notification_doc.link) {
+			return notification_doc.link;
+		}
 		const link_doctype = notification_doc.document_type
 			? notification_doc.document_type
 			: "Notification Log";
@@ -375,10 +425,15 @@ class EventsView extends BaseNotificationsView {
 	make() {
 		let today = frappe.datetime.get_today();
 		frappe
-			.xcall("frappe.desk.doctype.event.event.get_events", {
-				start: today,
-				end: today,
-			})
+			.xcall(
+				"frappe.desk.doctype.event.event.get_events",
+				{
+					start: today,
+					end: today,
+				},
+				"GET",
+				{ cache: true }
+			)
 			.then((event_list) => {
 				this.render_events_html(event_list);
 			});
@@ -411,7 +466,7 @@ class EventsView extends BaseNotificationsView {
 					location = `, ${event.location}`;
 				}
 
-				return `<a class="recent-item event" href="/app/event/${event.name}">
+				return `<a class="recent-item event" href="/desk/event/${event.name}">
 					<div class="event-border" style="border-color: ${event.color}"></div>
 					<div class="event-item">
 						<div class="event-subject">${event.subject}</div>
@@ -433,6 +488,56 @@ class EventsView extends BaseNotificationsView {
 			`;
 		}
 
+		this.container.html(html);
+	}
+}
+
+class ChangelogFeedView extends BaseNotificationsView {
+	make() {
+		this.render_changelog_feed_html(frappe.boot.changelog_feed || []);
+	}
+
+	render_changelog_feed_html(changelog_feed) {
+		let html = "";
+		if (changelog_feed.length) {
+			this.container.empty();
+			const get_changelog_feed_html = (changelog_feed_item) => {
+				const timestamp = frappe.datetime.prettyDate(
+					changelog_feed_item.posting_timestamp
+				);
+				const message_html = `<div class="message">
+							<div>${changelog_feed_item.title}</div>
+							<div class="notification-timestamp text-muted">
+							${changelog_feed_item.app_title} | ${timestamp}
+							</div>
+						</div>`;
+
+				const item_html = `<a class="recent-item notification-item"
+								href="${changelog_feed_item.link}"
+								data-name="${changelog_feed_item.title}"
+								target="_blank" rel="noopener noreferrer"
+							>
+							<div class="notification-body">
+								${message_html}
+							</div>
+							</div>
+						</a>`;
+
+				return item_html;
+			};
+			html = changelog_feed.map(get_changelog_feed_html).join("");
+		} else {
+			html = `<div class="notification-null-state">
+						<div class="text-center">
+							<img src="/assets/frappe/images/ui-states/notification-empty-state.svg" alt="Generic Empty State" class="null-state">
+							<div class="title">${__("Nothing New")}</div>
+							<div class="subtitle">
+								${__("There is nothing new to show you right now.")}
+							</div>
+						</div>
+					</div>
+					`;
+		}
 		this.container.html(html);
 	}
 }

@@ -16,7 +16,9 @@ class CustomizeFormField(Document):
 		allow_bulk_edit: DF.Check
 		allow_in_quick_entry: DF.Check
 		allow_on_submit: DF.Check
+		alignment: DF.Literal["", "Left", "Center", "Right"]
 		bold: DF.Check
+		button_color: DF.Literal["", "Default", "Primary", "Info", "Success", "Warning", "Danger"]
 		collapsible: DF.Check
 		collapsible_depends_on: DF.Code | None
 		columns: DF.Int
@@ -51,6 +53,7 @@ class CustomizeFormField(Document):
 			"Icon",
 			"Image",
 			"Int",
+			"JSON",
 			"Link",
 			"Long Text",
 			"Markdown Editor",
@@ -86,7 +89,9 @@ class CustomizeFormField(Document):
 		is_virtual: DF.Check
 		label: DF.Data | None
 		length: DF.Int
+		link_filters: DF.JSON | None
 		mandatory_depends_on: DF.Code | None
+		mask: DF.Check
 		no_copy: DF.Check
 		non_negative: DF.Check
 		options: DF.SmallText | None
@@ -94,6 +99,7 @@ class CustomizeFormField(Document):
 		parentfield: DF.Data
 		parenttype: DF.Data
 		permlevel: DF.Int
+		placeholder: DF.Data | None
 		precision: DF.Literal["", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
 		print_hide: DF.Check
 		print_hide_if_no_value: DF.Check
@@ -109,4 +115,5 @@ class CustomizeFormField(Document):
 		unique: DF.Check
 		width: DF.Data | None
 	# end: auto-generated types
+
 	pass

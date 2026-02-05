@@ -41,11 +41,13 @@ frappe.ui.form.on("Success Action", {
 		frm.action_multicheck = frappe.ui.form.make_control({
 			parent: next_actions_wrapper,
 			df: {
-				label: "Next Actions",
+				label: __("Next Actions"),
 				fieldname: "next_actions_multicheck",
 				fieldtype: "MultiCheck",
 				options: action_multicheck_options,
+				select_all: true,
 			},
+			render_input: true,
 		});
 	},
 });

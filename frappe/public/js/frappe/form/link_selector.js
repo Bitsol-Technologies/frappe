@@ -86,18 +86,18 @@ frappe.ui.form.LinkSelector = class LinkSelector {
 		frappe.link_search(
 			this.doctype,
 			args,
-			function (r) {
+			function (results) {
 				var parent = me.dialog.fields_dict.results.$wrapper;
 				if (args.start === 0) {
 					parent.empty();
 				}
 
-				if (r.values.length) {
-					for (const v of r.values) {
+				if (results.length) {
+					for (const v of results) {
 						var row = $(
 							repl(
 								'<div class="row link-select-row">\
-						<div class="col-xs-4">\
+						<div class="col-xs-4 ellipsis">\
 							<b><a href="#">%(name)s</a></b></div>\
 						<div class="col-xs-8">\
 							<span class="text-muted">%(values)s</span></div>\
@@ -116,7 +116,15 @@ frappe.ui.form.LinkSelector = class LinkSelector {
 								if (me.target.is_grid) {
 									// set in grid
 									// call search after value is set to get latest filtered results
-									me.set_in_grid(value).then(() => me.search());
+									me.set_in_grid(value).then(() => {
+										let previous_start = me.start;
+										let previous_page_length = me.page_length;
+										me.start = 0;
+										me.page_length = previous_start + previous_page_length;
+										me.search();
+										me.start = previous_start;
+										me.page_length = previous_page_length;
+									});
 								} else {
 									if (me.target.doctype)
 										me.target.parse_validate_and_set_in_model(value);
@@ -148,8 +156,9 @@ frappe.ui.form.LinkSelector = class LinkSelector {
 						});
 				}
 
+				parent.append('<div style="margin-bottom: 15px;"></div>');
 				var more_btn = me.dialog.fields_dict.more.$wrapper;
-				if (r.values.length < me.page_length) {
+				if (results.length < me.page_length) {
 					more_btn.hide();
 				} else {
 					more_btn.show();
@@ -246,7 +255,7 @@ frappe.link_search = function (doctype, args, callback, btn) {
 		type: "GET",
 		args: args,
 		callback: function (r) {
-			callback && callback(r);
+			callback && callback(r.message);
 		},
 		btn: btn,
 	});

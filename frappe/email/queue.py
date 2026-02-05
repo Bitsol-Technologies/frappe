@@ -1,11 +1,17 @@
 # Copyright (c) 2022, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
+from datetime import timedelta
 
 import frappe
 from frappe import _, msgprint
 from frappe.utils import cint, cstr, get_url, now_datetime
 from frappe.utils.data import getdate
 from frappe.utils.verified_command import get_signed_params, verify_request
+
+# After this percent of failures in every batch, entire batch is aborted.
+# This usually indicates a systemic failure so we shouldn't keep trying to send emails.
+EMAIL_QUEUE_BATCH_FAILURE_THRESHOLD_PERCENT = 0.33
+EMAIL_QUEUE_BATCH_FAILURE_THRESHOLD_COUNT = 10
 
 
 def get_emails_sent_this_month(email_account=None):
@@ -57,9 +63,7 @@ def get_emails_sent_today(email_account=None):
 	return frappe.db.sql(q, q_args)[0][0]
 
 
-def get_unsubscribe_message(
-	unsubscribe_message: str, expose_recipients: str
-) -> "frappe._dict[str, str]":
+def get_unsubscribe_message(unsubscribe_message: str, expose_recipients: str) -> "frappe._dict[str, str]":
 	unsubscribe_message = unsubscribe_message or _("Unsubscribe")
 	unsubscribe_link = f'<a href="<!--unsubscribe_url-->" target="_blank">{unsubscribe_message}</a>'
 	unsubscribe_html = _("{0} to stop receiving emails of this type").format(unsubscribe_link)
@@ -77,16 +81,14 @@ def get_unsubscribe_message(
 	return frappe._dict(html=html, text=text)
 
 
-def get_unsubcribed_url(
-	reference_doctype, reference_name, email, unsubscribe_method, unsubscribe_params
-):
+def get_unsubcribed_url(reference_doctype, reference_name, email, unsubscribe_method, unsubscribe_params):
 	params = {
 		"email": cstr(email),
 		"doctype": cstr(reference_doctype),
 		"name": cstr(reference_name),
 	}
 	if unsubscribe_params:
-		params.update(unsubscribe_params)
+		params.update(frappe.parse_json(unsubscribe_params))
 
 	return get_url(unsubscribe_method + "?" + get_signed_params(params))
 
@@ -94,7 +96,7 @@ def get_unsubcribed_url(
 @frappe.whitelist(allow_guest=True)
 def unsubscribe(doctype, name, email):
 	# unsubsribe from comments and communications
-	if not frappe.flags.in_test and not verify_request():
+	if not frappe.in_test and not verify_request():
 		return
 
 	try:
@@ -124,35 +126,46 @@ def return_unsubscribed_page(email, doctype, name):
 	)
 
 
-def flush(from_test=False):
-	"""flush email queue, every time: called from scheduler"""
-	from frappe.email.doctype.email_queue.email_queue import send_mail
+def flush():
+	"""flush email queue, every time: called from scheduler.
+
+	This should not be called outside of background jobs.
+	"""
+	from frappe.email.doctype.email_queue.email_queue import EmailQueue
 
 	# To avoid running jobs inside unit tests
 	if frappe.are_emails_muted():
 		msgprint(_("Emails are muted"))
-		from_test = True
 
 	if cint(frappe.db.get_default("suspend_email_queue")) == 1:
 		return
 
-	for row in get_queue():
+	email_queue_batch = get_queue()
+	if not email_queue_batch:
+		return
+
+	failed_email_queues = []
+	for row in email_queue_batch:
 		try:
-			frappe.enqueue(
-				method=send_mail,
-				email_queue_name=row.name,
-				now=from_test,
-				job_id=f"email_queue_sendmail_{row.name}",
-				queue="short",
-				deduplicate=True,
-			)
+			email_queue: EmailQueue = frappe.get_doc("Email Queue", row.name, for_update=True)
+			email_queue.send()
 		except Exception:
 			frappe.get_doc("Email Queue", row.name).log_error()
+			failed_email_queues.append(row.name)
+
+			if (
+				len(failed_email_queues) / len(email_queue_batch)
+				> EMAIL_QUEUE_BATCH_FAILURE_THRESHOLD_PERCENT
+				and len(failed_email_queues) > EMAIL_QUEUE_BATCH_FAILURE_THRESHOLD_COUNT
+			):
+				frappe.throw(_("Email Queue flushing aborted due to too many failures."))
 
 
 def get_queue():
+	batch_size = cint(frappe.conf.email_queue_batch_size) or 500
+
 	return frappe.db.sql(
-		"""select
+		f"""select
 			name, sender
 		from
 			`tabEmail Queue`
@@ -160,8 +173,32 @@ def get_queue():
 			(status='Not Sent' or status='Partially Sent') and
 			(send_after is null or send_after < %(now)s)
 		order
-			by priority desc, creation asc
-		limit 500""",
+			by priority desc, retry asc, creation asc
+		limit {batch_size}""",
 		{"now": now_datetime()},
 		as_dict=True,
 	)
+
+
+def retry_sending_emails():
+	emails_in_sending = frappe.get_all(
+		"Email Queue", filters={"status": "Sending"}, fields=["name", "modified"]
+	)
+	for e in emails_in_sending:
+		if now_datetime() - e["modified"] > timedelta(minutes=15):
+			update_fields = {}
+			email_queue = frappe.get_doc("Email Queue", e["name"])
+			sent_to_atleast_one_recipient = any(
+				rec.recipient for rec in email_queue.recipients if rec.is_mail_sent()
+			)
+			if email_queue.retry < cint(frappe.db.get_system_setting("email_retry_limit")) or 3:
+				update_fields.update(
+					{
+						"status": "Partially Sent" if sent_to_atleast_one_recipient else "Not Sent",
+						"retry": email_queue.retry + 1,
+					}
+				)
+			else:
+				update_fields.update({"status": "Error"})
+				update_fields.update({"error": "Retry Limit Exceeded"})
+			email_queue.update_status(**update_fields, commit=True)

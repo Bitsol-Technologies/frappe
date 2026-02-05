@@ -33,7 +33,7 @@
   }
  ],
  "links": [],
- "modified": "2022-09-07 05:16:14.587628",
+ "modified": "2025-02-20 19:21:33.012224",
  "modified_by": "Administrator",
  "module": "Core",
  "name": "View Log",
@@ -50,7 +50,8 @@
   }
  ],
  "quick_entry": 1,
- "sort_field": "modified",
+ "row_format": "Compressed",
+ "sort_field": "creation",
  "sort_order": "DESC",
  "states": []
 }

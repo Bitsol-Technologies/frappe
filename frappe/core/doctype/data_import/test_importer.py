@@ -1,15 +1,15 @@
 # Copyright (c) 2019, Frappe Technologies and Contributors
 # License: MIT. See LICENSE
 import frappe
-from frappe.core.doctype.data_import.importer import Importer
-from frappe.tests.test_query_builder import db_type_is, run_only_if
-from frappe.tests.utils import FrappeTestCase
+from frappe.core.doctype.data_import.importer import Importer, build_fields_dict_for_column_matching
+from frappe.tests import IntegrationTestCase
+from frappe.tests.test_query_builder import db_type_is, unimplemented_for
 from frappe.utils import format_duration, getdate
 
 doctype_name = "DocType for Import"
 
 
-class TestImporter(FrappeTestCase):
+class TestImporter(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
@@ -50,6 +50,25 @@ class TestImporter(FrappeTestCase):
 		self.assertEqual(doc3.another_number, 5)
 		self.assertEqual(format_duration(doc3.duration), "5d 5h 45m")
 
+	def test_data_validation_semicolon_success(self):
+		import_file = get_import_file("sample_import_file_semicolon")
+		data_import = self.get_importer(doctype_name, import_file, update=True, use_sniffer=True)
+
+		doc = data_import.get_preview_from_template().get("data", [{}])
+
+		self.assertEqual(doc[0][7], "child description with ,comma and")
+		# Column count should be 14 (+1 ID)
+		self.assertEqual(len(doc[0]), 15)
+
+	def test_data_validation_semicolon_failure(self):
+		import_file = get_import_file("sample_import_file_semicolon")
+
+		data_import = self.get_importer_semicolon(doctype_name, import_file, use_sniffer=True)
+		doc = data_import.get_preview_from_template().get("data", [{}])
+		# if semicolon delimiter detection fails, and falls back to comma,
+		# column number will be less than 15 -> 2 (+1 id)
+		self.assertLessEqual(len(doc[0]), 15)
+
 	def test_data_import_preview(self):
 		import_file = get_import_file("sample_import_file")
 		data_import = self.get_importer(doctype_name, import_file)
@@ -59,11 +78,11 @@ class TestImporter(FrappeTestCase):
 		self.assertEqual(len(preview.columns), 16)
 
 	# ignored on postgres because myisam doesn't exist on pg
-	@run_only_if(db_type_is.MARIADB)
+	@unimplemented_for(db_type_is.POSTGRES, db_type_is.SQLITE)
 	def test_data_import_without_mandatory_values(self):
 		import_file = get_import_file("sample_import_file_without_mandatory")
 		data_import = self.get_importer(doctype_name, import_file)
-		frappe.local.message_log = []
+		frappe.clear_messages()
 		data_import.start_import()
 		data_import.reload()
 
@@ -127,14 +146,44 @@ class TestImporter(FrappeTestCase):
 		self.assertEqual(updated_doc.table_field_1[0].child_description, "child description")
 		self.assertEqual(updated_doc.table_field_1_again[0].child_title, "child title again")
 
-	def get_importer(self, doctype, import_file, update=False):
+	def test_data_import_without_label(self):
+		"""Test fallback to fieldname when label is not set for a table."""
+
+		meta = frappe.get_meta(doctype_name)
+		table_field = meta.get_field("table_field_1")
+		original_label = table_field.label
+		table_field.label = None
+		fields_dict = build_fields_dict_for_column_matching(doctype_name)
+		expected_key = "Child Title (table_field_1)"
+		self.assertIn(
+			expected_key, fields_dict, f"Fallback failed: '{expected_key}' not found in mapping dict"
+		)
+		expected_id_key = "ID (table_field_1)"
+		self.assertIn(expected_id_key, fields_dict, "ID fallback failed")
+		table_field.label = original_label  # maintain sanity in test env
+
+	def get_importer(self, doctype, import_file, update=False, use_sniffer=False):
 		data_import = frappe.new_doc("Data Import")
 		data_import.import_type = "Insert New Records" if not update else "Update Existing Records"
 		data_import.reference_doctype = doctype
 		data_import.import_file = import_file.file_url
+		data_import.use_csv_sniffer = use_sniffer
 		data_import.insert()
 		# Commit so that the first import failure does not rollback the Data Import insert.
 		frappe.db.commit()
+
+		return data_import
+
+	def get_importer_semicolon(self, doctype, import_file, update=False, use_sniffer=False):
+		data_import = frappe.new_doc("Data Import")
+		data_import.import_type = "Insert New Records" if not update else "Update Existing Records"
+		data_import.reference_doctype = doctype
+		data_import.import_file = import_file.file_url
+		data_import.use_csv_sniffer = use_sniffer
+		# deliberately overwrite default delimiter options here, causing to fail when parsing `;`
+		data_import.delimiter_options = ","
+		data_import.insert()
+		frappe.db.commit()  # nosemgrep
 
 		return data_import
 
@@ -198,6 +247,7 @@ def create_doctype_if_not_exists(doctype_name, force=False):
 			"module": "Custom",
 			"custom": 1,
 			"autoname": "field:title",
+			"allow_import": 1,
 			"fields": [
 				{"label": "Title", "fieldname": "title", "reqd": 1, "fieldtype": "Data"},
 				{"label": "Description", "fieldname": "description", "fieldtype": "Small Text"},
@@ -224,7 +274,7 @@ def create_doctype_if_not_exists(doctype_name, force=False):
 					"options": table_1_name,
 				},
 			],
-			"permissions": [{"role": "System Manager"}],
+			"permissions": [{"role": "System Manager", "import": 1}],
 		}
 	).insert()
 

@@ -1,7 +1,7 @@
 context("Rounding behaviour", () => {
 	before(() => {
 		cy.login();
-		cy.visit("/app/");
+		cy.visit("/desk/");
 	});
 
 	it("Commercial Rounding", () => {
@@ -49,7 +49,7 @@ context("Rounding behaviour", () => {
 				let rounding_method = "Banker's Rounding";
 
 				expect(flt("0.5", 0, null, rounding_method)).eq(0);
-				expect(flt("0.3", null, rounding_method)).eq(0.3);
+				expect(flt("0.3", null, null, rounding_method)).eq(0.3);
 
 				expect(flt("1.5", 0, null, rounding_method)).eq(2);
 

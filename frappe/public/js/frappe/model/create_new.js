@@ -5,7 +5,6 @@ frappe.provide("frappe.model");
 
 $.extend(frappe.model, {
 	new_names: {},
-	new_name_count: {},
 
 	get_new_doc: function (doctype, parent_doc, parentfield, with_mandatory_children) {
 		frappe.provide("locals." + doctype);
@@ -61,11 +60,7 @@ $.extend(frappe.model, {
 		if (frappe.route_options && !doc.parent) {
 			$.each(frappe.route_options, function (fieldname, value) {
 				var df = frappe.meta.has_field(doctype, fieldname);
-				if (
-					df &&
-					in_list(["Link", "Data", "Select", "Dynamic Link"], df.fieldtype) &&
-					!df.no_copy
-				) {
+				if (df && !df.no_copy) {
 					doc[fieldname] = value;
 				}
 			});
@@ -80,37 +75,44 @@ $.extend(frappe.model, {
 	},
 
 	get_new_name: function (doctype) {
-		var cnt = frappe.model.new_name_count;
-		if (!cnt[doctype]) cnt[doctype] = 0;
-		cnt[doctype]++;
-		return frappe.router.slug(`new-${doctype}-${cnt[doctype]}`);
+		// random hash is added to idenity mislinked files when doc is not saved and file is uploaded.
+		return frappe.router.slug(`new-${doctype}-${frappe.utils.get_random(10)}`);
 	},
 
 	set_default_values: function (doc, parent_doc) {
-		var doctype = doc.doctype;
-		var docfields = frappe.meta.get_docfields(doctype);
-		var updated = [];
-		for (var fid = 0; fid < docfields.length; fid++) {
-			var f = docfields[fid];
-			if (!in_list(frappe.model.no_value_type, f.fieldtype) && doc[f.fieldname] == null) {
-				if (f.no_default) continue;
-				var v = frappe.model.get_default_value(f, doc, parent_doc);
-				if (v) {
-					if (in_list(["Int", "Check"], f.fieldtype)) v = cint(v);
-					else if (in_list(["Currency", "Float"], f.fieldtype)) v = flt(v);
+		let doctype = doc.doctype;
+		let docfields = frappe.meta.get_docfields(doctype);
+		let updated = [];
 
-					doc[f.fieldname] = v;
-					updated.push(f.fieldname);
-				} else if (
-					f.fieldtype == "Select" &&
-					f.options &&
-					typeof f.options === "string" &&
-					!in_list(["[Select]", "Loading..."], f.options)
-				) {
-					doc[f.fieldname] = f.options.split("\n")[0];
-				}
+		// Table types should be initialized
+		let fieldtypes_without_default = frappe.model.no_value_type.filter(
+			(fieldtype) => !frappe.model.table_fields.includes(fieldtype)
+		);
+		docfields.forEach((f) => {
+			if (
+				fieldtypes_without_default.includes(f.fieldtype) ||
+				doc[f.fieldname] != null ||
+				f.no_default
+			) {
+				return;
 			}
-		}
+
+			let v = frappe.model.get_default_value(f, doc, parent_doc);
+			if (v) {
+				if (["Int", "Check"].includes(f.fieldtype)) v = cint(v);
+				else if (["Currency", "Float"].includes(f.fieldtype)) v = flt(v);
+
+				doc[f.fieldname] = v;
+				updated.push(f.fieldname);
+			} else if (
+				f.fieldtype == "Select" &&
+				f.options &&
+				typeof f.options === "string" &&
+				!["[Select]", "Loading..."].includes(f.options)
+			) {
+				doc[f.fieldname] = f.options.split("\n")[0];
+			}
+		});
 		return updated;
 	},
 
@@ -222,6 +224,10 @@ $.extend(frappe.model, {
 			value = frappe.datetime.now_time();
 		}
 
+		if (frappe.model.table_fields.includes(df.fieldtype)) {
+			value = [];
+		}
+
 		// set it here so we know it was set as a default
 		df.__default_value = value;
 
@@ -273,23 +279,23 @@ $.extend(frappe.model, {
 	},
 
 	copy_doc: function (doc, from_amend, parent_doc, parentfield) {
-		var no_copy_list = ["name", "amended_from", "amendment_date", "cancel_reason"];
-		var newdoc = frappe.model.get_new_doc(doc.doctype, parent_doc, parentfield);
+		let no_copy_list = ["name", "amended_from", "amendment_date", "cancel_reason"];
+		let newdoc = frappe.model.get_new_doc(doc.doctype, parent_doc, parentfield);
 
-		for (var key in doc) {
-			// dont copy name and blank fields
-			var df = frappe.meta.get_docfield(doc.doctype, key);
+		for (let key in doc) {
+			// don't copy name and blank fields
+			let df = frappe.meta.get_docfield(doc.doctype, key);
 
-			if (
-				df &&
-				key.substr(0, 2) != "__" &&
-				!in_list(no_copy_list, key) &&
-				!(df && !from_amend && cint(df.no_copy) == 1)
-			) {
-				var value = doc[key] || [];
+			const is_internal_field = key.substring(0, 2) === "__";
+			const is_blocked_field = no_copy_list.includes(key);
+			const is_no_copy = !from_amend && df && cint(df.no_copy) == 1;
+			const is_password = df && df.fieldtype === "Password";
+
+			if (df && !is_internal_field && !is_blocked_field && !is_no_copy && !is_password) {
+				let value = doc[key] || [];
 				if (frappe.model.table_fields.includes(df.fieldtype)) {
-					for (var i = 0, j = value.length; i < j; i++) {
-						var d = value[i];
+					for (let i = 0, j = value.length; i < j; i++) {
+						let d = value[i];
 						frappe.model.copy_doc(d, from_amend, newdoc, df.fieldname);
 					}
 				} else {
@@ -298,7 +304,7 @@ $.extend(frappe.model, {
 			}
 		}
 
-		var user = frappe.session.user;
+		let user = frappe.session.user;
 
 		newdoc.__islocal = 1;
 		newdoc.docstatus = 0;

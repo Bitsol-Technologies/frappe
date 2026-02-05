@@ -3,26 +3,24 @@
 
 import frappe
 from frappe import _
+from frappe.query_builder import Field, functions
 
 
 @frappe.whitelist()
 def get_all_nodes(doctype, label, parent, tree_method, **filters):
 	"""Recursively gets all data from tree nodes"""
 
-	if "cmd" in filters:
-		del filters["cmd"]
+	filters.pop("cmd", None)
 	filters.pop("data", None)
 
 	tree_method = frappe.get_attr(tree_method)
 
-	if tree_method not in frappe.whitelisted:
-		frappe.throw(_("Not Permitted"), frappe.PermissionError)
+	frappe.is_whitelisted(tree_method)
 
 	data = tree_method(doctype, parent, **filters)
 	out = [dict(parent=label, data=data)]
 
-	if "is_root" in filters:
-		del filters["is_root"]
+	filters.pop("is_root", None)
 	to_check = [d.get("value") for d in data if d.get("expandable")]
 
 	while to_check:
@@ -37,27 +35,32 @@ def get_all_nodes(doctype, label, parent, tree_method, **filters):
 
 
 @frappe.whitelist()
-def get_children(doctype, parent="", **filters):
-	return _get_children(doctype, parent)
+def get_children(doctype, parent="", include_disabled=False, **filters):
+	if isinstance(include_disabled, str):
+		include_disabled = frappe.sbool(include_disabled)
+	return _get_children(doctype, parent, include_disabled=include_disabled)
 
 
-def _get_children(doctype, parent="", ignore_permissions=False):
-	parent_field = "parent_" + doctype.lower().replace(" ", "_")
-	filters = [[f"ifnull(`{parent_field}`,'')", "=", parent], ["docstatus", "<", 2]]
-
+def _get_children(doctype, parent="", ignore_permissions=False, include_disabled=False):
 	meta = frappe.get_meta(doctype)
+	parent_field = meta.get("nsm_parent_field") or "parent_" + frappe.scrub(doctype)
 
-	return frappe.get_list(
-		doctype,
-		fields=[
-			"name as value",
-			"{} as title".format(meta.get("title_field") or "name"),
-			"is_group as expandable",
-		],
-		filters=filters,
-		order_by="name",
-		ignore_permissions=ignore_permissions,
+	qb = (
+		frappe.qb.from_(doctype)
+		.select(
+			Field("name").as_("value"),
+			Field(meta.get("title_field") or "name").as_("title"),
+			Field("is_group").as_("expandable"),
+		)
+		.where(functions.IfNull(Field(parent_field), "").eq(parent))
+		.where(Field("docstatus") < 2)
 	)
+
+	if frappe.db.has_column(doctype, "disabled") and not include_disabled:
+		# used 0 instead of `false` since type of check in postgres is smallint
+		qb = qb.where(Field("disabled").eq(0))
+	# Order by name and execute
+	return qb.orderby("name").run(as_dict=True)
 
 
 @frappe.whitelist()
@@ -72,13 +75,15 @@ def make_tree_args(**kwarg):
 	kwarg.pop("cmd", None)
 
 	doctype = kwarg["doctype"]
-	parent_field = "parent_" + doctype.lower().replace(" ", "_")
+	parent_field = "parent_" + frappe.scrub(doctype)
 
 	if kwarg["is_root"] == "false":
 		kwarg["is_root"] = False
 	if kwarg["is_root"] == "true":
 		kwarg["is_root"] = True
 
-	kwarg.update({parent_field: kwarg.get("parent") or kwarg.get(parent_field)})
+	parent = kwarg.get("parent") or kwarg.get(parent_field)
+	if doctype != parent:
+		kwarg.update({parent_field: parent})
 
 	return frappe._dict(kwarg)

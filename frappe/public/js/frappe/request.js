@@ -10,17 +10,19 @@ frappe.request.ajax_count = 0;
 frappe.request.waiting_for_ajax = [];
 frappe.request.logs = {};
 
-frappe.xcall = function (method, params) {
+frappe.xcall = function (method, params, type, opts = {}) {
 	return new Promise((resolve, reject) => {
 		frappe.call({
 			method: method,
 			args: params,
+			type: type || "POST",
 			callback: (r) => {
 				resolve(r.message);
 			},
 			error: (r) => {
-				reject(r.message);
+				reject(r?.message);
 			},
+			...opts,
 		});
 	});
 };
@@ -36,8 +38,6 @@ frappe.call = function (opts) {
 			},
 			3
 		);
-		opts.always && opts.always();
-		return $.ajax();
 	}
 	if (typeof arguments[0] === "string") {
 		opts = {
@@ -88,7 +88,11 @@ frappe.call = function (opts) {
 
 	let url = opts.url;
 	if (!url) {
-		url = "/api/method/" + args.cmd;
+		let prefix = "/api/method/";
+		if (opts.api_version) {
+			prefix = `/api/${opts.api_version}/method/`;
+		}
+		url = prefix + args.cmd;
 		if (window.cordova) {
 			let host = frappe.request.url;
 			host = host.slice(0, host.length - 1);
@@ -113,10 +117,11 @@ frappe.call = function (opts) {
 		freeze_message: opts.freeze_message,
 		headers: opts.headers || {},
 		error_handlers: opts.error_handlers || {},
-		// show_spinner: !opts.no_spinner,
 		async: opts.async,
 		silent: opts.silent,
+		api_version: opts.api_version,
 		url,
+		cache: opts.cache,
 	});
 };
 
@@ -133,6 +138,7 @@ frappe.request.call = function (opts) {
 			} else {
 				frappe.app.handle_session_expired();
 			}
+			opts.error_callback && opts.error_callback();
 		},
 		404: function (xhr) {
 			frappe.msgprint({
@@ -140,6 +146,7 @@ frappe.request.call = function (opts) {
 				indicator: "red",
 				message: __("The resource you are looking for is not available"),
 			});
+			opts.error_callback && opts.error_callback();
 		},
 		403: function (xhr) {
 			if (frappe.session.user === "Guest" && frappe.session.logged_in_user !== "Guest") {
@@ -150,6 +157,7 @@ frappe.request.call = function (opts) {
 					title: __("Not permitted"),
 					indicator: "red",
 					message: xhr.responseJSON._error_message,
+					re_route: true,
 				});
 
 				xhr.responseJSON._server_messages = null;
@@ -169,6 +177,7 @@ frappe.request.call = function (opts) {
 					),
 				});
 			}
+			opts.error_callback && opts.error_callback();
 		},
 		508: function (xhr) {
 			frappe.utils.play_sound("error");
@@ -179,6 +188,7 @@ frappe.request.call = function (opts) {
 					"Another transaction is blocking this one. Please try again in a few seconds."
 				),
 			});
+			opts.error_callback && opts.error_callback();
 		},
 		413: function (data, xhr) {
 			frappe.msgprint({
@@ -188,6 +198,7 @@ frappe.request.call = function (opts) {
 					(frappe.boot.max_file_size || 5242880) / 1048576,
 				]),
 			});
+			opts.error_callback && opts.error_callback();
 		},
 		417: function (xhr) {
 			var r = xhr.responseJSON;
@@ -220,6 +231,7 @@ frappe.request.call = function (opts) {
 		},
 		502: function (xhr) {
 			frappe.msgprint(__("Internal Server Error"));
+			opts.error_callback && opts.error_callback();
 		},
 	};
 
@@ -237,7 +249,9 @@ frappe.request.call = function (opts) {
 			frappe.msgprint({
 				title: __("Deadlock Occurred"),
 				indicator: "red",
-				message: __("Server was too busy to process this request. Please try again."),
+				message: __(
+					"Server failed to process this request because of a concurrent conflicting request. Please try again."
+				),
 			});
 		},
 	};
@@ -256,7 +270,7 @@ frappe.request.call = function (opts) {
 			},
 			opts.headers
 		),
-		cache: false,
+		cache: window.dev_server ? false : opts.cache || false,
 	};
 
 	if (opts.args && opts.args.doctype) {
@@ -438,12 +452,18 @@ frappe.request.cleanup = function (opts, r) {
 		}
 
 		// show messages
-		if (r._server_messages && !opts.silent) {
+		//
+		let messages;
+		if (opts.api_version == "v2") {
+			messages = r.messages;
+		} else if (r._server_messages) {
+			messages = JSON.parse(r._server_messages);
+		}
+		if (messages && !opts.silent) {
 			// show server messages if no handlers exist
 			if (handlers.length === 0) {
-				r._server_messages = JSON.parse(r._server_messages);
 				frappe.hide_msgprint();
-				frappe.msgprint(r._server_messages);
+				frappe.msgprint(messages);
 			}
 		}
 
@@ -466,8 +486,8 @@ frappe.request.cleanup = function (opts, r) {
 			if (opts.args) {
 				console.log("======== arguments ========");
 				console.log(opts.args);
-				console.log("========");
 			}
+			console.log("======== debug messages ========");
 			$.each(JSON.parse(r._debug_messages), function (i, v) {
 				console.log(v);
 			});
@@ -588,20 +608,20 @@ frappe.request.report_error = function (xhr, request_opts) {
 			frappe.error_dialog = new frappe.ui.Dialog({
 				title: __("Server Error"),
 			});
-
-			if (error_report_email) {
-				frappe.error_dialog.set_primary_action(__("Report"), () => {
-					show_communication();
-					frappe.error_dialog.hide();
-				});
-			} else {
-				frappe.error_dialog.set_primary_action(__("Copy error to clipboard"), () => {
-					copy_markdown_to_clipboard();
-					frappe.error_dialog.hide();
-				});
-			}
-			frappe.error_dialog.wrapper.classList.add("msgprint-dialog");
 		}
+
+		if (error_report_email) {
+			frappe.error_dialog.set_primary_action(__("Report"), () => {
+				show_communication();
+				frappe.error_dialog.hide();
+			});
+		} else {
+			frappe.error_dialog.set_primary_action(__("Copy error to clipboard"), () => {
+				copy_markdown_to_clipboard();
+				frappe.error_dialog.hide();
+			});
+		}
+		frappe.error_dialog.wrapper.classList.add("msgprint-dialog");
 
 		let parts = strip(exc).split("\n");
 
@@ -618,17 +638,17 @@ frappe.request.report_error = function (xhr, request_opts) {
 };
 
 frappe.request.cleanup_request_opts = function (request_opts) {
-	var doc = (request_opts.args || {}).doc;
+	let doc = (request_opts.args || {}).doc;
 	if (doc) {
 		doc = JSON.parse(doc);
-		$.each(Object.keys(doc), function (i, key) {
-			if (key.indexOf("password") !== -1 && doc[key]) {
-				// mask the password
-				doc[key] = "*****";
-			}
-		});
+		frappe.utils.mask_passwords(doc);
 		request_opts.args.doc = JSON.stringify(doc);
 	}
+
+	if (request_opts.args) {
+		frappe.utils.mask_passwords(request_opts.args);
+	}
+
 	return request_opts;
 };
 

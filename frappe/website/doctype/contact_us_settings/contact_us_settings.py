@@ -26,12 +26,14 @@ class ContactUsSettings(Document):
 		forward_to_email: DF.Data | None
 		heading: DF.Data | None
 		introduction: DF.TextEditor | None
+		is_disabled: DF.Check
 		phone: DF.Data | None
 		pincode: DF.Data | None
 		query_options: DF.SmallText | None
 		skype: DF.Data | None
 		state: DF.Data | None
 	# end: auto-generated types
+
 	def on_update(self):
 		from frappe.website.utils import clear_cache
 

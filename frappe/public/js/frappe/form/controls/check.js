@@ -1,6 +1,7 @@
 frappe.ui.form.ControlCheck = class ControlCheck extends frappe.ui.form.ControlData {
 	static html_element = "input";
 	static input_type = "checkbox";
+	static trigger_change_on_input_event = false;
 	make_wrapper() {
 		this.$wrapper = $(`<div class="form-group frappe-control">
 			<div class="checkbox">
@@ -10,7 +11,7 @@ frappe.ui.form.ControlCheck = class ControlCheck extends frappe.ui.form.ControlD
 					<span class="label-area"></span>
 					<span class="ml-1 help"></span>
 				</label>
-				<p class="help-box small text-muted"></p>
+				<p class="help-box small text-extra-muted"></p>
 			</div>
 		</div>`).appendTo(this.parent);
 	}

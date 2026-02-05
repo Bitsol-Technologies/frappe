@@ -19,7 +19,7 @@ def get_user_settings(doctype, for_update=False):
 			where `user`=%s and `doctype`=%s""",
 			(frappe.session.user, doctype),
 		)
-		user_settings = user_settings and user_settings[0][0] or "{}"
+		user_settings = (user_settings and user_settings[0][0]) or "{}"
 
 		if not for_update:
 			update_user_settings(doctype, user_settings, True)
@@ -40,7 +40,6 @@ def update_user_settings(doctype, user_settings, for_update=False):
 			current = {}
 
 		current.update(user_settings)
-
 	frappe.cache.hset("_user_settings", f"{doctype}::{frappe.session.user}", json.dumps(current))
 
 
@@ -54,9 +53,9 @@ def sync_user_settings():
 				"mariadb": """INSERT INTO `__UserSettings`(`user`, `doctype`, `data`)
 				VALUES (%s, %s, %s)
 				ON DUPLICATE key UPDATE `data`=%s""",
-				"postgres": """INSERT INTO `__UserSettings` (`user`, `doctype`, `data`)
+				"*": """INSERT INTO `__UserSettings` (`user`, `doctype`, `data`)
 				VALUES (%s, %s, %s)
-				ON CONFLICT ("user", "doctype") DO UPDATE SET `data`=%s""",
+				ON CONFLICT (`user`, `doctype`) DO UPDATE SET `data`=%s""",
 			},
 			(user, doctype, data, data),
 			as_dict=1,
@@ -87,7 +86,10 @@ def update_user_settings_data(
 			if view_settings and view_settings.get("filters"):
 				view_filters = view_settings.get("filters")
 				for view_filter in view_filters:
-					if condition_fieldname and view_filter[filter_dict[condition_fieldname]] != condition_values:
+					if (
+						condition_fieldname
+						and view_filter[filter_dict[condition_fieldname]] != condition_values
+					):
 						continue
 					if view_filter[filter_dict[fieldname]] == old:
 						view_filter[filter_dict[fieldname]] = new

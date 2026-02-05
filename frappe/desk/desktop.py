@@ -3,14 +3,14 @@
 # Author - Shivam Mishra <shivam@frappe.io>
 
 from functools import wraps
-from json import dumps, loads
+from json import JSONDecodeError, dumps, loads
 
 import frappe
 from frappe import DoesNotExistError, ValidationError, _, _dict
 from frappe.boot import get_allowed_pages, get_allowed_reports
 from frappe.cache_manager import (
-	build_domain_restriced_doctype_cache,
-	build_domain_restriced_page_cache,
+	build_domain_restricted_doctype_cache,
+	build_domain_restricted_page_cache,
 	build_table_count_cache,
 )
 from frappe.core.doctype.custom_role.custom_role import get_custom_allowed_roles
@@ -22,8 +22,7 @@ def handle_not_exist(fn):
 		try:
 			return fn(*args, **kwargs)
 		except DoesNotExistError:
-			if frappe.message_log:
-				frappe.message_log.pop()
+			frappe.clear_last_message()
 			return []
 
 	return wrapper
@@ -62,19 +61,17 @@ class Workspace:
 
 			self.table_counts = get_table_with_counts()
 		self.restricted_doctypes = (
-			frappe.cache.get_value("domain_restricted_doctypes") or build_domain_restriced_doctype_cache()
+			frappe.cache.get_value("domain_restricted_doctypes") or build_domain_restricted_doctype_cache()
 		)
 		self.restricted_pages = (
-			frappe.cache.get_value("domain_restricted_pages") or build_domain_restriced_page_cache()
+			frappe.cache.get_value("domain_restricted_pages") or build_domain_restricted_page_cache()
 		)
 
 	def is_permitted(self):
-		"""Returns true if Has Role is not set or the user is allowed."""
+		"""Return true if `Has Role` is not set or the user is allowed."""
 		from frappe.utils import has_common
 
-		allowed = [
-			d.role for d in frappe.get_all("Has Role", fields=["role"], filters={"parent": self.doc.name})
-		]
+		allowed = [d.role for d in self.doc.roles]
 
 		custom_roles = get_custom_allowed_roles("page", self.doc.name)
 		allowed.extend(custom_roles)
@@ -89,7 +86,7 @@ class Workspace:
 
 	def get_cached(self, cache_key, fallback_fn):
 		value = frappe.cache.get_value(cache_key, user=frappe.session.user)
-		if value:
+		if value is not None:
 			return value
 
 		value = fallback_fn()
@@ -142,7 +139,7 @@ class Workspace:
 		item_type = item_type.lower()
 
 		if item_type == "doctype":
-			return name in self.can_read or [] and name in self.restricted_doctypes or []
+			return name in (self.can_read or []) and name in (self.restricted_doctypes or [])
 		if item_type == "page":
 			return name in self.allowed_pages and name in self.restricted_pages
 		if item_type == "report":
@@ -179,7 +176,6 @@ class Workspace:
 
 	def _prepare_item(self, item):
 		if item.dependencies:
-
 			dependencies = [dep.strip() for dep in item.dependencies.split(",")]
 
 			incomplete_dependencies = [d for d in dependencies if not self._doctype_contains_a_record(d)]
@@ -197,6 +193,9 @@ class Workspace:
 
 				item["count"] = count
 
+		if item.get("link_type") == "DocType":
+			item["description"] = frappe.get_meta(item.link_to).description
+
 		# Translate label
 		item["label"] = _(item.label) if item.label else _(item.name)
 
@@ -206,8 +205,7 @@ class Workspace:
 		from frappe.utils import has_common
 
 		allowed = [
-			d.role
-			for d in frappe.get_all("Has Role", fields=["role"], filters={"parent": custom_block_name})
+			d.role for d in frappe.get_all("Has Role", fields=["role"], filters={"parent": custom_block_name})
 		]
 
 		if not allowed:
@@ -340,6 +338,7 @@ class Workspace:
 		for doc in onboarding_doc.get_steps():
 			step = doc.as_dict().copy()
 			step.label = _(doc.title)
+			step.description = _(doc.description)
 			if step.action == "Create Entry":
 				step.is_submittable = frappe.db.get_value(
 					"DocType", step.reference_document, "is_submittable", cache=True
@@ -386,13 +385,12 @@ class Workspace:
 @frappe.whitelist()
 @frappe.read_only()
 def get_desktop_page(page):
-	"""Applies permissions, customizations and returns the configruration for a page
-	on desk.
+	"""Apply permissions, customizations and return the configuration for a page on desk.
 
 	Args:
 	        page (json): page data
 
-	Returns:
+	Return:
 	        dict: dictionary of cards, charts and shortcuts to be displayed on website
 	"""
 	try:
@@ -415,14 +413,20 @@ def get_desktop_page(page):
 @frappe.whitelist()
 def get_workspace_sidebar_items():
 	"""Get list of sidebar items for desk"""
+
+	from frappe.modules.utils import get_module_app
+
 	has_access = "Workspace Manager" in frappe.get_roles()
 
 	# don't get domain restricted pages
-	blocked_modules = frappe.get_doc("User", frappe.session.user).get_blocked_modules()
+	blocked_modules = frappe.get_cached_doc("User", frappe.session.user).get_blocked_modules()
 	blocked_modules.append("Dummy Module")
 
+	# adding None to allowed_domains to include pages without domain restriction
+	allowed_domains = [None, *frappe.get_active_domains()]
+
 	filters = {
-		"restrict_to_domain": ["in", frappe.get_active_domains()],
+		"restrict_to_domain": ["in", allowed_domains],
 		"module": ["not in", blocked_modules],
 	}
 
@@ -440,7 +444,13 @@ def get_workspace_sidebar_items():
 		"public",
 		"module",
 		"icon",
+		"indicator_color",
 		"is_hidden",
+		"app",
+		"type",
+		"link_type",
+		"link_to",
+		"external_link",
 	]
 	all_pages = frappe.get_all(
 		"Workspace", fields=fields, filters=filters, order_by=order_by, ignore_permissions=True
@@ -458,16 +468,33 @@ def get_workspace_sidebar_items():
 				elif page.for_user == frappe.session.user:
 					private_pages.append(page)
 				page["label"] = _(page.get("name"))
+
+			if not page["app"] and page["module"]:
+				page["app"] = frappe.db.get_value("Module Def", page["module"], "app_name") or get_module_app(
+					page["module"]
+				)
+			if page["link_type"] == "Report":
+				report_type, ref_doctype = frappe.db.get_value(
+					"Report", page["link_to"], ["report_type", "ref_doctype"]
+				)
+				page["report"] = {
+					"report_type": report_type,
+					"ref_doctype": ref_doctype,
+				}
+
 		except frappe.PermissionError:
 			pass
 	if private_pages:
 		pages.extend(private_pages)
 
 	if len(pages) == 0:
-		pages = [frappe.get_doc("Workspace", "Welcome Workspace").as_dict()]
-		pages[0]["label"] = _("Welcome Workspace")
+		pages.append(next((x for x in all_pages if x["title"] == "Welcome Workspace"), None))
 
-	return {"pages": pages, "has_access": has_access}
+	return {
+		"pages": pages,
+		"has_access": has_access,
+		"has_create_access": frappe.has_permission(doctype="Workspace", ptype="create"),
+	}
 
 
 def get_table_with_counts():
@@ -505,7 +532,7 @@ def get_custom_doctype_list(module):
 
 
 def get_custom_report_list(module):
-	"""Returns list on new style reports for modules."""
+	"""Return list on new style reports for modules."""
 	reports = frappe.get_all(
 		"Report",
 		fields=["name", "ref_doctype", "report_type"],
@@ -524,13 +551,15 @@ def get_custom_report_list(module):
 			else 0,
 			"label": _(r.name),
 			"link_to": r.name,
+			"report_ref_doctype": r.ref_doctype,
 		}
 		for r in reports
 	]
 
 
 def save_new_widget(doc, page, blocks, new_widgets):
-	if loads(new_widgets):
+	widgets = _dict()
+	if new_widgets:
 		widgets = _dict(loads(new_widgets))
 
 		if widgets.chart:
@@ -544,9 +573,7 @@ def save_new_widget(doc, page, blocks, new_widgets):
 				new_widget(widgets.custom_block, "Workspace Custom Block", "custom_blocks")
 			)
 		if widgets.number_card:
-			doc.number_cards.extend(
-				new_widget(widgets.number_card, "Workspace Number Card", "number_cards")
-			)
+			doc.number_cards.extend(new_widget(widgets.number_card, "Workspace Number Card", "number_cards"))
 		if widgets.card:
 			doc.build_links_table_from_card(widgets.card)
 
@@ -560,15 +587,13 @@ def save_new_widget(doc, page, blocks, new_widgets):
 		json_config = widgets and dumps(widgets, sort_keys=True, indent=4)
 
 		# Error log body
-		log = """
-		page: {}
-		config: {}
-		exception: {}
-		""".format(
-			page, json_config, e
-		)
+		log = f"""
+		page: {page}
+		config: {json_config}
+		exception: {e}
+		"""
 		doc.log_error("Could not save customization", log)
-		return False
+		raise
 
 	return True
 
@@ -619,14 +644,14 @@ def new_widget(config, doctype, parentfield):
 
 
 def prepare_widget(config, doctype, parentfield):
-	"""Create widget child table entries with parent details
+	"""Create widget child table entries with parent details.
 
 	Args:
 	        config (dict): Dictionary containing widget config
 	        doctype (string): Doctype name of the child table
 	        parentfield (string): Parent field for the child table
 
-	Returns:
+	Return:
 	        TYPE: List of Document objects
 	"""
 	if not config:
@@ -668,3 +693,8 @@ def update_onboarding_step(name, field, value):
 	frappe.db.set_value("Onboarding Step", name, field, value)
 
 	capture(frappe.scrub(name), app="frappe_onboarding", properties={field: value})
+
+
+@frappe.whitelist()
+def get_installed_apps():
+	return frappe.get_installed_apps()

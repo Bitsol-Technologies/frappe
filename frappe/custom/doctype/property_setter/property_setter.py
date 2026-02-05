@@ -30,6 +30,7 @@ class PropertySetter(Document):
 		row_name: DF.Data | None
 		value: DF.SmallText | None
 	# end: auto-generated types
+
 	def autoname(self):
 		self.name = "{doctype}-{field}-{property}".format(
 			doctype=self.doc_type, field=self.field_name or self.row_name or "main", property=self.property
@@ -40,6 +41,7 @@ class PropertySetter(Document):
 
 		if self.is_new():
 			delete_property_setter(self.doc_type, self.property, self.field_name, self.row_name)
+
 		frappe.clear_cache(doctype=self.doc_type)
 
 	def on_trash(self):
@@ -58,6 +60,16 @@ class PropertySetter(Document):
 
 			validate_fields_for_doctype(self.doc_type)
 
+	def get_permission_log_options(self, event=None):
+		if self.property in ("ignore_user_permissions", "permlevel"):
+			return {
+				"for_doctype": "DocType",
+				"for_document": self.doc_type,
+				"fields": ("value", "property", "field_name"),
+			}
+
+		self._no_perm_log = True
+
 
 def make_property_setter(
 	doctype,
@@ -67,17 +79,19 @@ def make_property_setter(
 	property_type,
 	for_doctype=False,
 	validate_fields_for_doctype=True,
+	is_system_generated=True,
 ):
 	# WARNING: Ignores Permissions
 	property_setter = frappe.get_doc(
 		{
 			"doctype": "Property Setter",
-			"doctype_or_field": for_doctype and "DocType" or "DocField",
+			"doctype_or_field": (for_doctype and "DocType") or "DocField",
 			"doc_type": doctype,
 			"field_name": fieldname,
 			"property": property,
 			"value": value,
 			"property_type": property_type,
+			"is_system_generated": is_system_generated,
 		}
 	)
 	property_setter.flags.ignore_permissions = True
@@ -86,12 +100,17 @@ def make_property_setter(
 	return property_setter
 
 
-def delete_property_setter(doc_type, property, field_name=None, row_name=None):
+def delete_property_setter(doc_type, property=None, field_name=None, row_name=None):
 	"""delete other property setters on this, if this is new"""
-	filters = dict(doc_type=doc_type, property=property)
+	filters = {"doc_type": doc_type}
+	if property:
+		filters["property"] = property
+
 	if field_name:
 		filters["field_name"] = field_name
 	if row_name:
 		filters["row_name"] = row_name
 
-	frappe.db.delete("Property Setter", filters)
+	property_setters = frappe.db.get_values("Property Setter", filters)
+	for ps in property_setters:
+		frappe.get_doc("Property Setter", ps).delete(ignore_permissions=True, force=True)

@@ -1,19 +1,32 @@
 <!-- Used as Button & Heading Control -->
 <script setup>
+import { computed } from "vue";
+
 const props = defineProps(["df", "value"]);
+
+const button_class = computed(() => {
+	const color_map = {
+		Default: "btn-default",
+		Primary: "btn-primary",
+		Info: "btn-info",
+		Success: "btn-success",
+		Warning: "btn-warning",
+		Danger: "btn-danger",
+	};
+	const color = props.df.button_color ?? "Default";
+
+	return `btn btn-xs ${color_map[color] || color_map.Default}`;
+});
 </script>
 
 <template>
-	<div
-		class="control frappe-control editable"
-		:data-fieldtype="df.fieldtype"
-	>
+	<div class="control frappe-control editable" :data-fieldtype="df.fieldtype">
 		<!-- label -->
 		<div class="field-controls">
 			<h4 v-if="df.fieldtype == 'Heading'">
 				<slot name="label" />
 			</h4>
-			<button v-else class="btn btn-xs btn-default">
+			<button v-else :class="button_class">
 				<slot name="label" />
 			</button>
 			<slot name="actions" />
@@ -28,5 +41,4 @@ const props = defineProps(["df", "value"]);
 h4 {
 	margin-bottom: 0px;
 }
-
 </style>

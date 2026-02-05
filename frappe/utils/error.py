@@ -8,6 +8,7 @@ from collections import Counter
 from contextlib import suppress
 
 import frappe
+from frappe.monitor import add_data_to_monitor
 
 EXCLUDE_EXCEPTIONS = (
 	frappe.AuthenticationError,
@@ -33,11 +34,10 @@ def _is_ldap_exception(e):
 	return False
 
 
-def log_error(
-	title=None, message=None, reference_doctype=None, reference_name=None, *, defer_insert=False
-):
+def log_error(title=None, message=None, reference_doctype=None, reference_name=None, *, defer_insert=False):
 	"""Log error to Error Log"""
 	from frappe.monitor import get_trace_id
+	from frappe.utils.sentry import capture_exception
 
 	# Parameter ALERT:
 	# the title and message may be swapped
@@ -58,14 +58,21 @@ def log_error(
 		print(f"Failed to log error in db: {title}")
 		return
 
+	trace_id = get_trace_id()
+	metadata = get_error_metadata()
+
 	error_log = frappe.get_doc(
 		doctype="Error Log",
 		error=traceback,
 		method=title,
 		reference_doctype=reference_doctype,
 		reference_name=reference_name,
-		trace_id=get_trace_id(),
+		trace_id=trace_id,
+		metadata=metadata,
 	)
+
+	# Capture exception data if telemetry is enabled
+	capture_exception(message=f"{title}\n{traceback}")
 
 	if frappe.flags.read_only or defer_insert:
 		error_log.deferred_insert()
@@ -73,8 +80,42 @@ def log_error(
 		return error_log.insert(ignore_permissions=True)
 
 
-def log_error_snapshot(exception: Exception):
+def get_error_metadata() -> str:
+	"""
+	Returns request/job metadata to store in Error Log for easier debugging
+	"""
+	import rq
 
+	from frappe.utils.logger import sanitized_dict
+
+	metadata = {}
+
+	try:
+		if job := rq.get_current_job():
+			metadata["type"] = "background_job"
+			metadata["job_id"] = job.id
+			metadata["job_name"] = frappe.cstr(job.kwargs.get("method"))
+			metadata["queue"] = job.origin
+			metadata["kwargs"] = sanitized_dict(job.kwargs)
+
+			if "run_scheduled_job" in metadata["job_name"]:
+				metadata["scheduled"] = True
+				metadata["job_type"] = job.kwargs.get("kwargs", {}).get("job_type", "")
+
+		else:
+			metadata["type"] = "http_request"
+			for key in ("method", "path", "referrer"):
+				metadata[key] = getattr(frappe.local.request, key)
+			metadata["form_dict"] = sanitized_dict(frappe.form_dict)
+
+		metadata["user"] = getattr(frappe.session, "user", "Unidentified")
+	except Exception:
+		# We don't want to bother with exception handling *while* gathering some error's metadata
+		pass
+	return frappe.as_json(metadata)
+
+
+def log_error_snapshot(exception: Exception):
 	if isinstance(exception, EXCLUDE_EXCEPTIONS) or _is_ldap_exception(exception):
 		return
 
@@ -83,6 +124,7 @@ def log_error_snapshot(exception: Exception):
 	try:
 		log_error(title=str(exception), defer_insert=True)
 		logger.error("New Exception collected in error log")
+		add_data_to_monitor(exception=exception.__class__.__name__)
 	except Exception as e:
 		logger.error(f"Could not take error snapshot: {e}", exc_info=True)
 
@@ -90,15 +132,11 @@ def log_error_snapshot(exception: Exception):
 def get_default_args(func):
 	"""Get default arguments of a function from its signature."""
 	signature = inspect.signature(func)
-	return {
-		k: v.default for k, v in signature.parameters.items() if v.default is not inspect.Parameter.empty
-	}
+	return {k: v.default for k, v in signature.parameters.items() if v.default is not inspect.Parameter.empty}
 
 
 def raise_error_on_no_output(error_message, error_type=None, keep_quiet=None):
 	"""Decorate any function to throw error incase of missing output.
-
-	TODO: Remove keep_quiet flag after testing and fixing sendmail flow.
 
 	:param error_message: error message to raise
 	:param error_type: type of error to raise
@@ -107,11 +145,22 @@ def raise_error_on_no_output(error_message, error_type=None, keep_quiet=None):
 	:type error_type: Exception Class
 	:type keep_quiet: function
 
-	>>> @raise_error_on_no_output("Ingradients missing")
-	... def get_indradients(_raise_error=1): return
-	...
-	>>> get_ingradients()
-	`Exception Name`: Ingradients missing
+	---
+	Example:
+
+	```py
+	@raise_error_on_no_output("Ingredients are missing")
+	def get_ingredients(_raise_error=1):
+	    return
+
+
+	# this will raise an Exception with message "Ingredients are missing"
+	ingredients = get_ingredients()
+	```
+
+	---
+
+	TODO: Remove keep_quiet flag after testing and fixing sendmail flow.
 	"""
 
 	def decorator_raise_error_on_no_output(func):
@@ -141,19 +190,20 @@ def guess_exception_source(exception: str) -> str | None:
 
 	- For unhandled exception last python file from apps folder is responsible.
 	- For frappe.throws the exception source is possibly present after skipping frappe.throw frames
-	- For server script the file name is `<serverscript>`
+	- For server script the file name contains SERVER_SCRIPT_FILE_PREFIX
 
 	"""
+	from frappe.utils.safe_exec import SERVER_SCRIPT_FILE_PREFIX
+
 	with suppress(Exception):
 		installed_apps = frappe.get_installed_apps()
 		app_priority = {app: installed_apps.index(app) for app in installed_apps}
 
 		APP_NAME_REGEX = re.compile(r".*File.*apps/(?P<app_name>\w+)/\1/")
-		SERVER_SCRIPT_FRAME = re.compile(r".*<serverscript>")
 
 		apps = Counter()
 		for line in reversed(exception.splitlines()):
-			if SERVER_SCRIPT_FRAME.match(line):
+			if SERVER_SCRIPT_FILE_PREFIX in line:
 				return "Server Script"
 
 			if matches := APP_NAME_REGEX.match(line):

@@ -22,7 +22,7 @@ export default class Column {
 		if (this.df.description) {
 			$(`
 				<p class="col-sm-12 form-column-description">
-					${__(this.df.description)}
+					${__(this.df.description, null, this.df.parent)}
 				</p>
 			`).prependTo(this.wrapper);
 		}
@@ -30,7 +30,7 @@ export default class Column {
 		if (this.df.label) {
 			$(`
 				<label class="column-label">
-					${__(this.df.label)}
+					${__(this.df.label, null, this.df.parent)}
 				</label>
 			`).prependTo(this.wrapper);
 		}

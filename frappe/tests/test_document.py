@@ -1,18 +1,21 @@
 # Copyright (c) 2022, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
+import inspect
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
 import frappe
 from frappe.app import make_form_dict
+from frappe.core.doctype.doctype.test_doctype import new_doctype
+from frappe.core.doctype.user.user import User
 from frappe.desk.doctype.note.note import Note
+from frappe.model.document import LazyChildTable
 from frappe.model.naming import make_autoname, parse_naming_series, revert_series_if_last
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase
 from frappe.utils import cint, now_datetime, set_request
 from frappe.website.serve import get_response
-
-from . import update_system_settings
 
 
 class CustomTestNote(Note):
@@ -26,7 +29,7 @@ class CustomNoteWithoutProperty(Note):
 		return now_datetime() - self.creation
 
 
-class TestDocument(FrappeTestCase):
+class TestDocument(IntegrationTestCase):
 	def test_get_return_empty_list_for_table_field_if_none(self):
 		d = frappe.get_doc({"doctype": "User"})
 		self.assertEqual(d.get("roles"), [])
@@ -63,6 +66,20 @@ class TestDocument(FrappeTestCase):
 		self.assertEqual(d.send_reminder, 1)
 		return d
 
+	def test_website_route_default(self):
+		default = frappe.generate_hash()
+		child_table = new_doctype(default=default, istable=1).insert().name
+		parent = (
+			new_doctype(fields=[{"fieldtype": "Table", "options": child_table, "fieldname": "child_table"}])
+			.insert()
+			.name
+		)
+
+		doc = frappe.get_doc({"doctype": parent, "child_table": [{"some_fieldname": "xasd"}]}).insert()
+		doc.append("child_table", {})
+		doc.save()
+		self.assertEqual(doc.child_table[-1].some_fieldname, default)
+
 	def test_insert_with_child(self):
 		d = frappe.get_doc(
 			{
@@ -83,12 +100,58 @@ class TestDocument(FrappeTestCase):
 
 		self.assertEqual(frappe.db.get_value(d.doctype, d.name, "subject"), "subject changed")
 
+	def test_discard_transitions(self):
+		d = self.test_insert()
+		self.assertEqual(d.docstatus, 0)
+
+		# invalid: Submit > Discard, Cancel > Discard
+		d.submit()
+		self.assertRaises(frappe.ValidationError, d.discard)
+		d.reload()
+
+		d.cancel()
+		self.assertRaises(frappe.ValidationError, d.discard)
+
+		# valid: Draft > Discard
+		d2 = self.test_insert()
+		d2.discard()
+		self.assertEqual(d2.docstatus, 2)
+
+	def test_save_on_discard_throws(self):
+		from frappe.desk.doctype.event.event import Event
+
+		d3 = self.test_insert()
+
+		def test_on_discard(d3):
+			d3.subject = d3.subject + "update"
+			d3.save()
+
+		d3.on_discard = (test_on_discard)(d3)
+		d3.on_discard = test_on_discard.__get__(d3, Event)
+
+		self.assertRaises(frappe.ValidationError, d3.discard)
+
 	def test_value_changed(self):
 		d = self.test_insert()
 		d.subject = "subject changed again"
-		d.save()
+		d.load_doc_before_save()
+		d.update_modified()
+
 		self.assertTrue(d.has_value_changed("subject"))
+		self.assertTrue(d.has_value_changed("modified"))
+
+		self.assertFalse(d.has_value_changed("creation"))
 		self.assertFalse(d.has_value_changed("event_type"))
+
+		user = frappe.get_doc("User", "Administrator")
+		user.load_doc_before_save()
+		role1 = user.roles[0]
+		role2 = user.roles[1]
+
+		role1.role = "New Role"
+
+		self.assertTrue(role1.has_value_changed("role"))
+		self.assertFalse(role2.has_value_changed("role"))
 
 	def test_mandatory(self):
 		# TODO: recheck if it is OK to force delete
@@ -108,9 +171,7 @@ class TestDocument(FrappeTestCase):
 
 	def test_text_editor_field(self):
 		try:
-			frappe.get_doc(
-				doctype="Activity Log", subject="test", message='<img src="test.png" />'
-			).insert()
+			frappe.get_doc(doctype="Activity Log", subject="test", message='<img src="test.png" />').insert()
 		except frappe.MandatoryError:
 			self.fail("Text Editor false positive mandatory error")
 
@@ -160,6 +221,9 @@ class TestDocument(FrappeTestCase):
 
 		self.assertEqual(frappe.db.get_value("User", d.name), d.name)
 
+		d.append("roles", {"role": ("Guest", "Administrator")})
+		self.assertRaises(AssertionError, d._validate_links)
+
 	def test_validate(self):
 		d = self.test_insert()
 		d.starts_on = "2014-01-01"
@@ -198,16 +262,16 @@ class TestDocument(FrappeTestCase):
 
 	def test_xss_filter(self):
 		d = self.test_insert()
+		subject = d.subject
 
 		# script
 		xss = '<script>alert("XSS")</script>'
-		escaped_xss = xss.replace("<", "&lt;").replace(">", "&gt;")
 		d.subject += xss
 		d.save()
 		d.reload()
 
 		self.assertTrue(xss not in d.subject)
-		self.assertTrue(escaped_xss in d.subject)
+		self.assertEqual(subject, d.subject)
 
 		# onload
 		xss = '<div onload="alert("XSS")">Test</div>'
@@ -314,7 +378,9 @@ class TestDocument(FrappeTestCase):
 		@contextmanager
 		def customize_note(with_options=False):
 			options = (
-				"frappe.utils.now_datetime() - frappe.utils.get_datetime(doc.creation)" if with_options else ""
+				"frappe.utils.now_datetime() - frappe.utils.get_datetime(doc.creation)"
+				if with_options
+				else ""
 			)
 			custom_field = frappe.get_doc(
 				{
@@ -473,7 +539,7 @@ class TestDocument(FrappeTestCase):
 		self.assertEqual(val, changed_val)
 
 
-class TestDocumentWebView(FrappeTestCase):
+class TestDocumentWebView(IntegrationTestCase):
 	def get(self, path, user="Guest"):
 		frappe.set_user(user)
 		set_request(method="GET", path=path)
@@ -487,13 +553,9 @@ class TestDocumentWebView(FrappeTestCase):
 		document_key = todo.get_document_share_key()
 
 		# with old-style signature key
-		update_system_settings({"allow_older_web_view_links": True}, True)
 		old_document_key = todo.get_signature()
 		url = f"/ToDo/{todo.name}?key={old_document_key}"
-		self.assertEqual(self.get(url).status, "200 OK")
-
-		update_system_settings({"allow_older_web_view_links": False}, True)
-		self.assertEqual(self.get(url).status, "401 UNAUTHORIZED")
+		self.assertEqual(self.get(url).status, "403 FORBIDDEN")
 
 		# with valid key
 		url = f"/ToDo/{todo.name}?key={document_key}"
@@ -501,7 +563,7 @@ class TestDocumentWebView(FrappeTestCase):
 
 		# with invalid key
 		invalid_key_url = f"/ToDo/{todo.name}?key=INVALID_KEY"
-		self.assertEqual(self.get(invalid_key_url).status, "401 UNAUTHORIZED")
+		self.assertEqual(self.get(invalid_key_url).status, "403 FORBIDDEN")
 
 		# expire the key
 		document_key_doc = frappe.get_doc("Document Share Key", {"key": document_key})
@@ -517,6 +579,63 @@ class TestDocumentWebView(FrappeTestCase):
 
 		# Logged-in user can access the page without key
 		self.assertEqual(self.get(url_without_key, "Administrator").status, "200 OK")
+
+	def test_base_class_set_correctly_on_has_web_view_change(self):
+		from pathlib import Path
+
+		from frappe.modules.utils import get_doc_path, scrub
+
+		frappe.flags.allow_doctype_export = True
+
+		frappe.delete_doc_if_exists("DocType", "Test WebViewDocType", force=1)
+		test_doctype = new_doctype(
+			"Test WebViewDocType",
+			custom=0,
+			fields=[
+				{"fieldname": "test_field", "fieldtype": "Data"},
+				{"fieldname": "route", "fieldtype": "Data"},
+				{"fieldname": "is_published", "fieldtype": "Check"},
+			],
+		)
+		test_doctype.insert()
+
+		doc_path = Path(get_doc_path(test_doctype.module, test_doctype.doctype, test_doctype.name))
+		controller_file_path = doc_path / f"{scrub(test_doctype.name)}.py"
+
+		# enable web view
+		test_doctype.has_web_view = 1
+		test_doctype.is_published_field = "is_published"
+		test_doctype.save()
+
+		# check if base class was updated to "WebsiteGenerator"
+		with open(controller_file_path) as f:
+			file_content = f.read()
+			self.assertIn(
+				"import WebsiteGenerator",
+				file_content,
+				"`WebsiteGenerator` not imported when web view is enabled!",
+			)
+			self.assertIn(
+				"(WebsiteGenerator)",
+				file_content,
+				"`Document` class not replaced with `WebsiteGenerator` when web view is enabled!",
+			)
+
+		# disable web view
+		test_doctype.has_web_view = 0
+		test_doctype.save()
+
+		# check if base class was updated to "Document" again
+		with open(controller_file_path) as f:
+			file_content = f.read()
+			self.assertIn(
+				"import Document", file_content, "`Document` not imported when web view is disabled!"
+			)
+			self.assertIn(
+				"(Document)",
+				file_content,
+				"`WebsiteGenerator` class not replaced with `Document` when web view is disabled!",
+			)
 
 	def test_bulk_inserts(self):
 		from frappe.model.document import bulk_insert
@@ -552,3 +671,114 @@ class TestDocumentWebView(FrappeTestCase):
 		)
 		self.assertEqual(sent_docs - all_docs, set(), "All docs should be inserted")
 		self.assertEqual(sent_child_docs - all_child_docs, set(), "All child docs should be inserted")
+
+
+class TestLazyDocument(IntegrationTestCase):
+	def test_lazy_documents(self):
+		# Warmup meta etc
+		_ = frappe.get_lazy_doc("User", "Guest")
+		eager_guest: User = frappe.get_doc("User", "Guest")
+
+		# Only one query for parent document
+		with self.assertQueryCount(1):
+			guest: User = frappe.get_lazy_doc("User", "Guest")
+			self.assertEqual(guest.user_type, "Website User")
+
+		# Only one query for one table access
+		with self.assertQueryCount(1):
+			guest_role = guest.roles[0]
+			self.assertEqual(guest_role.role, "Guest")
+			self.assertIsInstance(guest_role, type(eager_guest.roles[0]))
+
+		# Only one query for one table access
+		with self.assertQueryCount(1):
+			_ = guest.role_profiles
+
+		# No queries for repeat access, same object
+		with self.assertQueryCount(0):
+			guest_role_repeat_access = guest.roles[0]
+		self.assertIs(guest_role, guest_role_repeat_access)
+
+		# Same object after first access
+		with self.assertQueryCount(0):
+			self.assertIs(guest.roles, guest.get("roles"))
+
+		# things accessing __dict__ by default should be updated too
+		self.assertTrue(frappe.get_lazy_doc("User", "Guest").get("roles"))
+
+	def test_lazy_doc_efficient_saves(self):
+		# Only touched tables and self should be updated
+		guest = frappe.get_lazy_doc("User", "Guest")
+		with self.assertQueryCount(1):
+			guest.db_update_all()
+
+		guest = frappe.get_lazy_doc("User", "Guest")
+		_ = guest.roles
+		with self.assertQueryCount(1 + len(guest.roles)):
+			guest.db_update_all()
+
+		# Save should works, it won't be efficient because internal code will just trigger fetching
+		# of child tables to resave them.
+		guest.save()
+
+	def test_lazy_magic(self):
+		self.assertIsNone(getattr(LazyChildTable, "__set__", None))
+
+		guest = frappe.get_lazy_doc("User", "Guest")
+		# table fields will be populated on first access
+		self.assertIsNone(guest.__dict__.get("roles"))
+		roles = guest.roles
+		self.assertIs(guest.__dict__.get("roles"), roles)
+
+		# Allow overriding from user code
+		roles_copy = deepcopy(roles)
+		guest.roles = roles_copy
+		self.assertIs(guest.__dict__.get("roles"), roles_copy)
+
+		with patch(f"{LazyChildTable.__module__}.{LazyChildTable.__name__}.__get__") as getter:
+			_ = guest.roles
+			self.assertFalse(getter.called)
+
+		guest = frappe.get_lazy_doc("User", "Guest")
+		with patch(f"{LazyChildTable.__module__}.{LazyChildTable.__name__}.__get__") as getter:
+			_ = guest.roles
+			self.assertTrue(getter.called)
+
+		# Ensure same method signature
+		eager_guest: User = frappe.get_doc("User", "Guest")
+		original_class = eager_guest.__class__
+		lazy_class = guest.__class__
+
+		def compare_signatures(a, b, attr):
+			a_sig = inspect.signature(getattr(a, attr)).parameters
+			b_sig = inspect.signature(getattr(b, attr)).parameters
+
+			for (param_a, value_a), (param_b, value_b) in zip(a_sig.items(), b_sig.items(), strict=True):
+				self.assertEqual(param_a, param_b)
+				self.assertEqual(value_a.default, value_b.default)
+
+		for method in ("append", "extend", "db_update_all", "get"):
+			compare_signatures(original_class, lazy_class, method)
+
+	def test_append_extend_update(self):
+		guest = frappe.get_lazy_doc("User", "Guest")
+		_ = guest.append("roles")
+		self.assertEqual(len(guest.roles), 2)
+
+		guest = frappe.get_lazy_doc("User", "Guest")
+		_ = guest.extend("roles", [{}])
+		self.assertEqual(len(guest.roles), 2)
+
+		guest = frappe.get_lazy_doc("User", "Guest")
+		_ = guest.update({"roles": [{"role": "Administrator"}]})
+		self.assertEqual(len(guest.roles), 1)
+		self.assertEqual(guest.roles[0].role, "Administrator")
+
+		guest = frappe.get_lazy_doc("User", "Guest")
+		_ = guest.set("roles", [{"role": "Administrator"}])
+		self.assertEqual(len(guest.roles), 1)
+		self.assertEqual(guest.roles[0].role, "Administrator")
+
+	def test_for_update(self):
+		guest = frappe.get_lazy_doc("User", "Guest", for_update=True)
+		self.assertTrue(guest.flags.for_update)

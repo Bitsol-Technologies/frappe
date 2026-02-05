@@ -75,7 +75,7 @@ frappe.views.InteractionComposer = class InteractionComposer {
 				options: "",
 				hidden: 1,
 			},
-			{ label: __("Public"), fieldtype: "Check", fieldname: "public", default: "1" },
+			{ label: __("Public"), fieldtype: "Check", fieldname: "public", default: "0" },
 			{ fieldtype: "Column Break" },
 			{ label: __("Date"), fieldtype: "Datetime", fieldname: "due_date" },
 			{
@@ -261,7 +261,8 @@ frappe.views.InteractionComposer = class InteractionComposer {
 						message: __("{0} created successfully", [form_values.interaction_type]),
 						indicator: "green",
 					});
-					if ("assigned_to" in form_values) {
+
+					if (form_values.interaction_type === "Event" && "assigned_to" in form_values) {
 						me.assign_document(r.message, form_values["assigned_to"]);
 					}
 
@@ -281,31 +282,29 @@ frappe.views.InteractionComposer = class InteractionComposer {
 	}
 
 	assign_document(doc, assignee) {
-		if (doc.doctype != "ToDo") {
-			frappe.call({
-				method: "frappe.desk.form.assign_to.add",
-				args: {
-					doctype: doc.doctype,
-					name: doc.name,
-					assign_to: JSON.stringify([assignee]),
-				},
-				callback: function (r) {
-					if (!r.exc) {
-						frappe.show_alert({
-							message: __("The document has been assigned to {0}", [assignee]),
-							indicator: "green",
-						});
-						return;
-					} else {
-						frappe.show_alert({
-							message: __("The document could not be correctly assigned"),
-							indicator: "orange",
-						});
-						return;
-					}
-				},
-			});
-		}
+		frappe.call({
+			method: "frappe.desk.form.assign_to.add",
+			args: {
+				doctype: doc.doctype,
+				name: doc.name,
+				assign_to: JSON.stringify([assignee]),
+			},
+			callback: function (r) {
+				if (!r.exc) {
+					frappe.show_alert({
+						message: __("The document has been assigned to {0}", [assignee]),
+						indicator: "green",
+					});
+					return;
+				} else {
+					frappe.show_alert({
+						message: __("The document could not be correctly assigned"),
+						indicator: "orange",
+					});
+					return;
+				}
+			},
+		});
 	}
 
 	add_attachments(doc, attachments) {
@@ -354,7 +353,7 @@ function get_doc_mappings() {
 				due_date: "date",
 				reference_doctype: "reference_type",
 				reference_document: "reference_name",
-				assigned_to: "owner",
+				assigned_to: "allocated_to",
 			},
 			reqd_fields: ["description"],
 			hidden_fields: ["public", "category"],

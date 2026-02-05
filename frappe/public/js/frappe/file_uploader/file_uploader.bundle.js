@@ -3,6 +3,7 @@ import FileUploaderComponent from "./FileUploader.vue";
 import { watch } from "vue";
 
 class FileUploader {
+	static UploadOptions = [];
 	constructor({
 		wrapper,
 		method,
@@ -21,13 +22,37 @@ class FileUploader {
 		attach_doc_image,
 		frm,
 		make_attachments_public,
+		allow_web_link,
+		allow_take_photo,
+		allow_toggle_private,
+		allow_toggle_optimize,
+		allow_google_drive,
 	} = {}) {
 		frm && frm.attachments.max_reached(true);
+
+		if (allow_toggle_private === undefined) {
+			allow_toggle_private = true;
+		}
+
+		allow_toggle_private = Boolean(
+			allow_toggle_private && frappe.utils.can_upload_public_files()
+		);
+		this.can_toggle_private = allow_toggle_private;
 
 		if (!wrapper) {
 			this.make_dialog(dialog_title);
 		} else {
 			this.wrapper = wrapper.get ? wrapper.get(0) : wrapper;
+		}
+
+		if (restrictions && !restrictions.allowed_file_types) {
+			// apply global allow list if present
+			let allowed_extensions = frappe.sys_defaults?.allowed_file_extensions;
+			if (allowed_extensions) {
+				restrictions.allowed_file_types = allowed_extensions
+					.split("\n")
+					.map((ext) => `.${ext}`);
+			}
 		}
 
 		let app = createApp(FileUploaderComponent, {
@@ -45,6 +70,22 @@ class FileUploader {
 			disable_file_browser,
 			attach_doc_image,
 			make_attachments_public,
+			allow_web_link,
+			allow_take_photo,
+			allow_toggle_private,
+			allow_toggle_optimize,
+			allow_google_drive,
+			additional_upload_handlers: this.constructor.UploadOptions.map((k) => ({
+				...k,
+				wrappedAction: () =>
+					k.action({
+						dialog: this.dialog,
+						uploader: this.uploader,
+						doctype,
+						docname,
+						fieldname,
+					}),
+			})),
 		});
 		SetVueGlobals(app);
 		this.uploader = app.mount(this.wrapper);
@@ -57,7 +98,7 @@ class FileUploader {
 			() => this.uploader.files,
 			(files) => {
 				let all_private = files.every((file) => file.private);
-				if (this.dialog) {
+				if (this.dialog && this.can_toggle_private) {
 					this.dialog.set_secondary_action_label(
 						all_private ? __("Set all public") : __("Set all private")
 					);
@@ -103,24 +144,28 @@ class FileUploader {
 	}
 
 	upload_files() {
-		this.dialog && this.dialog.get_primary_btn().prop("disabled", true);
-		this.dialog && this.dialog.get_secondary_btn().prop("disabled", true);
-		return this.uploader.upload_files();
+		return this.uploader.upload_files(this.dialog);
 	}
 
 	make_dialog(title) {
-		this.dialog = new frappe.ui.Dialog({
+		const dialog_opts = {
 			title: title || __("Upload"),
 			primary_action_label: __("Upload"),
 			primary_action: () => this.upload_files(),
-			secondary_action_label: __("Set all private"),
-			secondary_action: () => {
-				this.uploader.toggle_all_private();
-			},
 			on_page_show: () => {
 				this.uploader.wrapper_ready = true;
 			},
-		});
+		};
+
+		// Only add secondary action if user is allowed to toggle privacy
+		if (this.can_toggle_private) {
+			dialog_opts.secondary_action_label = __("Set all private");
+			dialog_opts.secondary_action = () => {
+				this.uploader.toggle_all_private();
+			};
+		}
+
+		this.dialog = new frappe.ui.Dialog(dialog_opts);
 
 		this.wrapper = this.dialog.body;
 		this.dialog.show();

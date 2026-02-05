@@ -3,10 +3,10 @@
 import frappe
 from frappe.core.doctype.user.user import get_system_users
 from frappe.desk.form.assign_to import add as assign_task
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase
 
 
-class TestNotificationLog(FrappeTestCase):
+class TestNotificationLog(IntegrationTestCase):
 	def test_assignment(self):
 		todo = get_todo()
 		user = get_user()
@@ -30,9 +30,7 @@ class TestNotificationLog(FrappeTestCase):
 		self.assertEqual(log_type, "Share")
 
 		email = get_last_email_queue()
-		content = "Subject: {} shared a document ToDo".format(
-			frappe.utils.get_fullname(frappe.session.user)
-		)
+		content = f"Subject: {frappe.utils.get_fullname(frappe.session.user)} shared a document ToDo"
 		self.assertTrue(content in email.message)
 
 

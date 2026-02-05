@@ -1,8 +1,25 @@
 frappe.ui.form.on("File", {
 	refresh: function (frm) {
+		if (frm.doc.file_url) {
+			frm.add_custom_button(__("View File"), () => {
+				if (!frappe.utils.is_url(frm.doc.file_url)) {
+					window.open(window.location.origin + frm.doc.file_url);
+				} else {
+					window.open(frm.doc.file_url);
+				}
+			});
+		}
+
 		if (!frm.doc.is_folder) {
 			// add download button
 			frm.add_custom_button(__("Download"), () => frm.trigger("download"), "fa fa-download");
+		}
+
+		if (!frm.doc.is_private) {
+			frm.dashboard.set_headline(
+				__("This file is public. It can be accessed without authentication."),
+				"orange"
+			);
 		}
 
 		frm.toggle_display("preview", false);
@@ -20,8 +37,9 @@ frappe.ui.form.on("File", {
 		if (frm.doc.file_name && frm.doc.file_name.split(".").splice(-1)[0] === "zip") {
 			frm.add_custom_button(__("Unzip"), () => frm.trigger("unzip"));
 		}
-		if (frm.doc.file_url) {
-			frm.add_web_link(frm.doc.file_url, __("View file"));
+
+		if (!frappe.utils.can_upload_public_files() && frm.doc.is_private) {
+			frm.set_df_property("is_private", "read_only", 1);
 		}
 	},
 
@@ -33,14 +51,15 @@ frappe.ui.form.on("File", {
 			$preview = $(`<div class="img_preview">
 				<img
 					class="img-responsive"
-					src="${frm.doc.file_url}"
+					style="max-width: 500px";
+					src="${frappe.utils.escape_html(frm.doc.file_url)}"
 					onerror="${frm.toggle_display("preview", false)}"
 				/>
 			</div>`);
 		} else if (frappe.utils.is_video_file(frm.doc.file_url)) {
 			$preview = $(`<div class="img_preview">
 				<video width="480" height="320" controls>
-					<source src="${frm.doc.file_url}">
+					<source src="${frappe.utils.escape_html(frm.doc.file_url)}">
 					${__("Your browser does not support the video element.")}
 				</video>
 			</div>`);
@@ -51,14 +70,14 @@ frappe.ui.form.on("File", {
 						style="background:#323639;"
 						width="100%"
 						height="1190"
-						src="${frm.doc.file_url}" type="application/pdf"
+						src="${frappe.utils.escape_html(frm.doc.file_url)}" type="application/pdf"
 					>
 				</object>
 			</div>`);
 		} else if (file_extension === "mp3") {
 			$preview = $(`<div class="img_preview">
 				<audio width="480" height="60" controls>
-					<source src="${frm.doc.file_url}" type="audio/mpeg">
+					<source src="${frappe.utils.escape_html(frm.doc.file_url)}" type="audio/mpeg">
 					${__("Your browser does not support the audio element.")}
 				</audio >
 			</div>`);
@@ -75,7 +94,16 @@ frappe.ui.form.on("File", {
 		if (frm.doc.file_name) {
 			file_url = file_url.replace(/#/g, "%23");
 		}
-		window.open(file_url);
+
+		// create temporary link element to simulate a download click
+		var link = document.createElement("a");
+		link.href = file_url;
+		link.download = frm.doc.file_name;
+		link.style.display = "none";
+
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
 	},
 
 	optimize: function (frm) {

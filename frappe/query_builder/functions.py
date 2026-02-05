@@ -5,7 +5,15 @@ from pypika.functions import *
 from pypika.terms import Arithmetic, ArithmeticExpression, CustomFunction, Function
 
 import frappe
-from frappe.query_builder.custom import GROUP_CONCAT, MATCH, STRING_AGG, TO_TSVECTOR
+from frappe.query_builder.custom import (
+	GROUP_CONCAT,
+	MATCH,
+	STRING_AGG,
+	TO_TSVECTOR,
+	Month,
+	MonthName,
+	Quarter,
+)
 from frappe.query_builder.utils import ImportMapper, db_type_is
 
 from .utils import PseudoColumn
@@ -17,20 +25,25 @@ class Concat_ws(Function):
 
 
 class Locate(Function):
-	def __init__(self, *terms, **kwargs):
-		terms = list(terms)
-		if not isinstance(terms[0], str):
-			terms[0] = terms[0].get_sql()
-		super().__init__("LOCATE", *terms, **kwargs)
+	def __init__(self, needle, haystack, **kwargs):
+		super().__init__("LOCATE", needle, haystack, **kwargs)
 
 
-class Ifnull(IfNull):
-	def __init__(self, condition, term, **kwargs):
-		if not isinstance(condition, str):
-			condition = condition.get_sql()
-		if not isinstance(term, str):
-			term = term.get_sql()
-		super().__init__(condition, term, **kwargs)
+class Strpos(Function):
+	def __init__(self, needle, haystack, **kwargs):
+		super().__init__("STRPOS", haystack, needle, **kwargs)
+
+
+class Instr(Function):
+	def __init__(self, needle, haystack, **kwargs):
+		super().__init__("INSTR", haystack, needle, **kwargs)
+
+
+Locate = ImportMapper({db_type_is.MARIADB: Locate, db_type_is.POSTGRES: Strpos, db_type_is.SQLITE: Instr})
+
+
+# for backward compatibility
+Ifnull = IfNull
 
 
 class Timestamp(Function):
@@ -84,6 +97,11 @@ DateFormat = ImportMapper(
 )
 
 
+class YearWeek(Function):
+	def __init__(self, term):
+		super().__init__("YEARWEEK", term, 1)
+
+
 class _PostgresUnixTimestamp(Extract):
 	# Note: this is just a special case of "Extract" function with "epoch" hardcoded.
 	# Check super definition to see how it works.
@@ -129,9 +147,9 @@ class Cast_(Function):
 
 def _aggregate(function, dt, fieldname, filters, **kwargs):
 	return (
-		frappe.qb.get_query(dt, filters=filters, fields=[function(PseudoColumn(fieldname))]).run(
-			**kwargs
-		)[0][0]
+		frappe.qb.get_query(dt, filters=filters, fields=[function(PseudoColumn(fieldname))]).run(**kwargs)[0][
+			0
+		]
 		or 0
 	)
 

@@ -14,10 +14,13 @@ class WebsiteRouteRedirect(Document):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
+		forward_query_parameters: DF.Check
 		parent: DF.Data
 		parentfield: DF.Data
 		parenttype: DF.Data
+		redirect_http_status: DF.Literal["301", "302", "307", "308"]
 		source: DF.SmallText
 		target: DF.SmallText
 	# end: auto-generated types
+
 	pass

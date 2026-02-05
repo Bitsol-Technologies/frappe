@@ -14,14 +14,15 @@ frappe.ui.Tags = class {
 
 	setup(parent, placeholder) {
 		this.$ul = parent;
-		this.$input = $(`<input class="tags-input form-control"></input>`);
+		this.$input = $(`<input class="tags-input form-control mt-2"></input>`);
 
 		this.$inputWrapper = this.get_list_element(this.$input);
-		this.$placeholder = this.get_list_element(
-			$(`<span class="tags-placeholder text-muted">${placeholder}</span>`)
-		);
+		this.$placeholder =
+			$(`<button class="add-tags-btn text-muted btn btn-link icon-btn" id="add_tags">
+				${__(placeholder)}
+			</button>`);
+		this.$placeholder.appendTo(this.$ul.find(".form-sidebar-items"));
 		this.$inputWrapper.appendTo(this.$ul);
-		this.$placeholder.appendTo(this.$ul);
 
 		this.deactivate();
 		this.bind();
@@ -37,9 +38,18 @@ frappe.ui.Tags = class {
 		};
 
 		this.$input.keypress((e) => {
-			if (e.which == 13 || e.keyCode == 13) select_tag();
+			if (e.which == 13 || e.keyCode == 13) {
+				// Triggers event when <enter> is pressed
+				this.$input.trigger("enter-pressed-in-addtag");
+			}
 		});
 		this.$input.focusout(select_tag);
+
+		this.$input.on("input-selected", () => {
+			// Adds tag if a input is selected
+			select_tag();
+			this.deactivate();
+		});
 
 		this.$input.on("blur", () => {
 			this.deactivate();
@@ -69,7 +79,7 @@ frappe.ui.Tags = class {
 		if (label && label !== "" && !this.tagsList.includes(label)) {
 			let $tag = this.get_tag(label);
 			let row = this.get_list_element($tag, "form-tag-row");
-			row.insertBefore(this.$inputWrapper);
+			row.insertAfter(this.$inputWrapper);
 			this.tagsList.push(label);
 			this.onTagAdd && this.onTagAdd(label);
 		}
@@ -93,23 +103,28 @@ frappe.ui.Tags = class {
 	}
 
 	get_list_element($element, class_name = "") {
-		let $li = $(`<li class="${class_name}"></li>`);
+		let $li = $(`<div class="${class_name}"></div>`);
 		$element.appendTo($li);
 		return $li;
 	}
 
 	get_tag(label) {
-		let $tag = frappe.get_data_pill(label, label, (target, pill_wrapper) => {
-			this.removeTag(target);
-			pill_wrapper.closest(".form-tag-row").remove();
-		});
-
+		let colored = true;
+		let $tag = frappe.get_data_pill(
+			label,
+			label,
+			(target, pill_wrapper) => {
+				this.removeTag(target);
+				pill_wrapper.closest(".form-tag-row").remove();
+			},
+			null,
+			colored
+		);
 		if (this.onTagClick) {
 			$tag.on("click", ".pill-label", () => {
 				this.onTagClick(label);
 			});
 		}
-
 		return $tag;
 	}
 };

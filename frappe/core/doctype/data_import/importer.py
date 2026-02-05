@@ -1,7 +1,6 @@
 # Copyright (c) 2020, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
 
-import io
 import json
 import os
 import re
@@ -27,9 +26,12 @@ DURATION_PATTERN = re.compile(r"^(?:(\d+d)?((^|\s)\d+h)?((^|\s)\d+m)?((^|\s)\d+s
 
 
 class Importer:
-	def __init__(self, doctype, data_import=None, file_path=None, import_type=None, console=False):
+	def __init__(
+		self, doctype, data_import=None, file_path=None, import_type=None, console=False, use_sniffer=False
+	):
 		self.doctype = doctype
 		self.console = console
+		self.use_sniffer = use_sniffer
 
 		self.data_import = data_import
 		if not self.data_import:
@@ -45,6 +47,8 @@ class Importer:
 			file_path or data_import.google_sheets_url or data_import.import_file,
 			self.template_options,
 			self.import_type,
+			console=self.console,
+			use_sniffer=self.use_sniffer,
 		)
 
 	def get_data_for_import_preview(self):
@@ -103,11 +107,12 @@ class Importer:
 
 		# Do not remove rows in case of retry after an error or pending data import
 		if (
-			self.data_import.status == "Partial Success"
+			self.data_import.status in ("Partial Success", "Error")
 			and len(import_log) >= self.data_import.payload_count
 		):
 			# remove previous failures from import log only in case of retry after partial success
 			import_log = [log for log in import_log if log.get("success")]
+			frappe.db.delete("Data Import Log", {"success": 0, "data_import": self.data_import.name})
 
 		# get successfully imported rows
 		imported_rows = []
@@ -151,8 +156,8 @@ class Importer:
 
 					if self.console:
 						update_progress_bar(
-							f"Importing {total_payload_count} records",
-							current_index,
+							f"Importing {self.doctype}: {total_payload_count} records",
+							current_index - 1,
 							total_payload_count,
 						)
 					elif total_payload_count > 5:
@@ -178,7 +183,7 @@ class Importer:
 
 					log_index += 1
 
-					if not self.data_import.status == "Partial Success":
+					if self.data_import.status != "Partial Success":
 						self.data_import.db_set("status", "Partial Success")
 
 					# commit after every successful import
@@ -216,13 +221,21 @@ class Importer:
 		)
 
 		# set status
-		failures = [log for log in import_log if not log.get("success")]
-		if len(failures) == total_payload_count:
-			status = "Pending"
-		elif len(failures) > 0:
+		successes = []
+		failures = []
+		for log in import_log:
+			if log.get("success"):
+				successes.append(log)
+			else:
+				failures.append(log)
+		if len(failures) >= total_payload_count and len(successes) == 0:
+			status = "Error"
+		elif len(failures) > 0 and len(successes) > 0:
 			status = "Partial Success"
-		else:
+		elif len(successes) == total_payload_count:
 			status = "Success"
+		else:
+			status = "Pending"
 
 		if self.console:
 			self.print_import_log(import_log)
@@ -393,12 +406,16 @@ class Importer:
 
 
 class ImportFile:
-	def __init__(self, doctype, file, template_options=None, import_type=None):
+	def __init__(
+		self, doctype, file, template_options=None, import_type=None, *, console=False, use_sniffer=False
+	):
 		self.doctype = doctype
 		self.template_options = template_options or frappe._dict(column_to_field_map=frappe._dict())
 		self.column_to_field_map = self.template_options.column_to_field_map
 		self.import_type = import_type
 		self.warnings = []
+		self.console = console
+		self.use_sniffer = use_sniffer
 
 		self.file_doc = self.file_path = self.google_sheets_url = None
 		if isinstance(file, str):
@@ -485,7 +502,7 @@ class ImportFile:
 					"read_only": col.df.read_only,
 				}
 
-		data = [[row.row_number] + row.as_list() for row in self.data]
+		data = [[row.row_number, *row.as_list()] for row in self.data]
 
 		warnings = self.get_warnings()
 
@@ -512,8 +529,8 @@ class ImportFile:
 
 	def parse_next_row_for_import(self, data):
 		"""
-		Parses rows that make up a doc. A doc maybe built from a single row or multiple rows.
-		Returns the doc, rows, and data without the rows.
+		Parse rows that make up a doc. A doc maybe built from a single row or multiple rows.
+		Return the doc, rows, and data without the rows.
 		"""
 		doctypes = self.header.doctypes
 
@@ -526,7 +543,6 @@ class ImportFile:
 			# subsequent rows that have blank values in parent columns
 			# are considered as child rows
 			parent_column_indexes = self.header.get_column_indexes(self.doctype)
-			parent_row_values = first_row.get_values(parent_column_indexes)
 
 			data_without_first_row = data[1:]
 			for row in data_without_first_row:
@@ -596,12 +612,11 @@ class ImportFile:
 			frappe.throw(_("Import template should be of type .csv, .xlsx or .xls"), title=error_title)
 
 		if extension == "csv":
-			data = read_csv_content(content)
+			data = read_csv_content(content, use_sniffer=self.use_sniffer)
 		elif extension == "xlsx":
 			data = read_xlsx_file_from_attached_file(fcontent=content)
 		elif extension == "xls":
 			data = read_xls_file_from_attached_file(content)
-
 		return data
 
 
@@ -620,7 +635,9 @@ class Row:
 		if len_row != len_columns:
 			less_than_columns = len_row < len_columns
 			message = (
-				"Row has less values than columns" if less_than_columns else "Row has more values than columns"
+				"Row has less values than columns"
+				if less_than_columns
+				else "Row has more values than columns"
 			)
 			self.warnings.append(
 				{
@@ -655,7 +672,7 @@ class Row:
 		for key in frappe.model.default_fields + frappe.model.child_table_fields + ("__islocal",):
 			doc.pop(key, None)
 
-		for col, value in zip(columns, values):
+		for col, value in zip(columns, values, strict=False):
 			df = col.df
 			if value in INVALID_VALUES:
 				value = None
@@ -715,8 +732,23 @@ class Row:
 					}
 				)
 				return
-		elif df.fieldtype in ["Date", "Datetime"]:
+		elif df.fieldtype == "Date":
 			value = self.get_date(value, col)
+			if isinstance(value, str):
+				# value was not parsed as datetime object
+				self.warnings.append(
+					{
+						"row": self.row_number,
+						"col": col.column_number,
+						"field": df_as_json(df),
+						"message": _("Value {0} must in {1} format").format(
+							frappe.bold(value), frappe.bold(get_user_format(col.date_format))
+						),
+					}
+				)
+				return
+		elif df.fieldtype == "Datetime":
+			value = self.get_datetime(value, col)
 			if isinstance(value, str):
 				# value was not parsed as datetime object
 				self.warnings.append(
@@ -750,7 +782,7 @@ class Row:
 
 	def parse_value(self, value, col):
 		df = col.df
-		if isinstance(value, (datetime, date)) and df.fieldtype in ["Date", "Datetime"]:
+		if isinstance(value, datetime | date) and df.fieldtype in ["Date", "Datetime"]:
 			return value
 
 		value = cstr(value)
@@ -765,15 +797,31 @@ class Row:
 			value = cint(value)
 		elif df.fieldtype in ["Float", "Percent", "Currency"]:
 			value = flt(value)
-		elif df.fieldtype in ["Date", "Datetime"]:
+		elif df.fieldtype == "Date":
 			value = self.get_date(value, col)
+		elif df.fieldtype == "Datetime":
+			value = self.get_datetime(value, col)
 		elif df.fieldtype == "Duration":
 			value = duration_to_seconds(value)
 
 		return value
 
-	def get_date(self, value, column):
-		if isinstance(value, (datetime, date)):
+	def get_date(self, value, column) -> date:
+		if isinstance(value, date):
+			return value
+
+		date_format = column.date_format
+		if date_format:
+			try:
+				return datetime.strptime(value, date_format).date()
+			except ValueError:
+				# ignore date values that dont match the format
+				# import will break for these values later
+				pass
+		return value
+
+	def get_datetime(self, value, column) -> datetime:
+		if isinstance(value, datetime):
 			return value
 
 		date_format = column.date_format
@@ -937,7 +985,7 @@ class Column:
 		"""
 
 		def guess_date_format(d):
-			if isinstance(d, (datetime, date, time)):
+			if isinstance(d, datetime | date | time):
 				if self.df.fieldtype == "Date":
 					return "%Y-%m-%d"
 				if self.df.fieldtype == "Datetime":
@@ -986,9 +1034,10 @@ class Column:
 
 		if self.df.fieldtype == "Link":
 			# find all values that dont exist
-			values = list({cstr(v) for v in self.column_values if v})
+			transform = (lambda v: cstr(v).lower()) if frappe.db.db_type == "mariadb" else cstr
+			values = list({transform(v) for v in self.column_values if v})
 			exists = [
-				cstr(d.name) for d in frappe.get_all(self.df.options, filters={"name": ("in", values)})
+				transform(d.name) for d in frappe.get_all(self.df.options, filters={"name": ("in", values)})
 			]
 			not_exists = list(set(values) - set(exists))
 			if not_exists:
@@ -1003,7 +1052,13 @@ class Column:
 				)
 		elif self.df.fieldtype in ("Date", "Time", "Datetime"):
 			# guess date/time format
+			# TODO: add possibility for user, to define the date format explicitly in the Data Import UI
+			# for example, if date column in file is in  %d-%m-%y  format -> 23-04-24.
+			# The date guesser might fail, as, this can be also parsed as %y-%m-%d, as both 23 and 24 are valid for year & for day
+			# This is an issue that cannot be handled automatically, no matter how we try, as it completely depends on the user's input.
+			# Defining an explicit value which surely recognizes
 			self.date_format = self.guess_date_format_for_column()
+
 			if not self.date_format:
 				if self.df.fieldtype == "Time":
 					self.date_format = "%H:%M:%S"
@@ -1098,7 +1153,8 @@ def build_fields_dict_for_column_matching(parent_doctype):
 	doctypes = [(parent_doctype, None)] + [(df.options, df) for df in parent_meta.get_table_fields()]
 
 	for doctype, table_df in doctypes:
-		translated_table_label = _(table_df.label) if table_df else None
+		table_ref = (table_df.label or table_df.fieldname) if table_df else None
+		translated_table_label = _(table_ref) if table_ref else None
 
 		# name field
 		name_df = frappe._dict(
@@ -1120,7 +1176,7 @@ def build_fields_dict_for_column_matching(parent_doctype):
 		else:
 			name_headers = (
 				f"{table_df.fieldname}.name",  # fieldname
-				f"ID ({table_df.label})",  # label
+				f"ID ({table_ref})",  # label
 				"{} ({})".format(_("ID"), translated_table_label),  # translated label
 			)
 
@@ -1138,7 +1194,6 @@ def build_fields_dict_for_column_matching(parent_doctype):
 
 			label = (df.label or "").strip()
 			translated_label = _(label)
-			parent = df.parent or parent_doctype
 
 			if parent_doctype == doctype:
 				# for parent doctypes keys will be
@@ -1175,7 +1230,7 @@ def build_fields_dict_for_column_matching(parent_doctype):
 					# fieldname
 					f"{table_df.fieldname}.{df.fieldname}",
 					# label
-					f"{label} ({table_df.label})",
+					f"{label} ({table_ref})",
 					# translated label
 					f"{translated_label} ({translated_table_label})",
 				):
@@ -1234,9 +1289,7 @@ def get_item_at_index(_list, i, default=None):
 
 
 def get_user_format(date_format):
-	return (
-		date_format.replace("%Y", "yyyy").replace("%y", "yy").replace("%m", "mm").replace("%d", "dd")
-	)
+	return date_format.replace("%Y", "yyyy").replace("%y", "yy").replace("%m", "mm").replace("%d", "dd")
 
 
 def df_as_json(df):

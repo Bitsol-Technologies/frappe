@@ -18,6 +18,9 @@
   "icon",
   "column_break_1",
   "base_url",
+  "configuration_section",
+  "sign_ups",
+  "show_in_resource_metadata",
   "client_urls",
   "authorize_url",
   "access_token_url",
@@ -50,7 +53,7 @@
    "fieldname": "social_login_provider",
    "fieldtype": "Select",
    "label": "Social Login Provider",
-   "options": "Custom\nFacebook\nFrappe\nGitHub\nGoogle\nOffice 365\nSalesforce\nfairlogin",
+   "options": "Custom\nFacebook\nFrappe\nGitHub\nGoogle\nOffice 365\nSalesforce\nfairlogin\nKeycloak",
    "set_only_once": 1
   },
   {
@@ -157,11 +160,32 @@
    "fieldname": "user_id_property",
    "fieldtype": "Data",
    "label": "User ID Property"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "configuration_section",
+   "fieldtype": "Section Break",
+   "label": "Configuration"
+  },
+  {
+   "description": "Controls whether new users can sign up using this Social Login Key. If unset, Website Settings is respected.",
+   "fieldname": "sign_ups",
+   "fieldtype": "Select",
+   "label": "Sign ups",
+   "options": "\nAllow\nDeny"
+  },
+  {
+   "default": "1",
+   "description": "Allows clients to view this as an Authorization Server when querying the <code>/.well-known/oauth-protected-resource</code> end point.",
+   "fieldname": "show_in_resource_metadata",
+   "fieldtype": "Check",
+   "label": "Show in Resource Metadata"
   }
  ],
+ "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2020-09-30 14:37:13.616002",
+ "modified": "2025-07-03 12:47:01.696817",
  "modified_by": "Administrator",
  "module": "Integrations",
  "name": "Social Login Key",
@@ -180,8 +204,10 @@
    "write": 1
   }
  ],
- "sort_field": "modified",
+ "row_format": "Dynamic",
+ "sort_field": "creation",
  "sort_order": "DESC",
+ "states": [],
  "title_field": "provider_name",
  "track_changes": 1
 }

@@ -1,11 +1,12 @@
+import types
 import typing
 
-from pypika import MySQLQuery, Order, PostgreSQLQuery, terms
-from pypika.dialects import MySQLQueryBuilder, PostgreSQLQueryBuilder
+from pypika import MySQLQuery, Order, PostgreSQLQuery, SQLLiteQuery, terms
+from pypika.dialects import MySQLQueryBuilder, PostgreSQLQueryBuilder, SQLLiteQueryBuilder
 from pypika.queries import QueryBuilder, Schema, Table
 from pypika.terms import Function
 
-from frappe.query_builder.terms import ParameterizedValueWrapper
+from frappe.query_builder.terms import ParameterizedValueWrapper, SQLiteParameterizedValueWrapper
 from frappe.utils import get_table_name
 
 
@@ -62,8 +63,8 @@ class MariaDB(Base, MySQLQuery):
 
 
 class Postgres(Base, PostgreSQLQuery):
-	field_translation = {"table_name": "relname", "table_rows": "n_tup_ins"}
-	schema_translation = {"tables": "pg_stat_all_tables"}
+	field_translation = types.MappingProxyType({"table_name": "relname", "table_rows": "n_tup_ins"})
+	schema_translation = types.MappingProxyType({"tables": "pg_stat_all_tables"})
 	# TODO: Find a better way to do this
 	# These are interdependent query changes that need fixing. These
 	# translations happen in the same query. But there is no check to see if
@@ -95,4 +96,20 @@ class Postgres(Base, PostgreSQLQuery):
 		elif isinstance(table, str):
 			table = cls.DocType(table)
 
+		return super().from_(table, *args, **kwargs)
+
+
+class SQLite(Base, SQLLiteQuery):
+	Field = terms.Field
+
+	_BuilderClasss = SQLLiteQueryBuilder
+
+	@classmethod
+	def _builder(cls, *args, **kwargs) -> "SQLLiteQueryBuilder":
+		return super()._builder(*args, wrapper_cls=SQLiteParameterizedValueWrapper, **kwargs)
+
+	@classmethod
+	def from_(cls, table, *args, **kwargs):
+		if isinstance(table, str):
+			table = cls.DocType(table)
 		return super().from_(table, *args, **kwargs)

@@ -31,28 +31,26 @@ def execute(filters=None):
 
 
 def get_columns(filters):
+	reference_doctype = filters.get("reference_doctype")
 	return [
-		"{reference_doctype}:Link/{reference_doctype}".format(
-			reference_doctype=filters.get("reference_doctype")
-		),
-		"Address Line 1",
-		"Address Line 2",
-		"City",
-		"State",
-		"Postal Code",
-		"Country",
-		"Is Primary Address:Check",
-		"First Name",
-		"Last Name",
-		"Address",
-		"Phone",
-		"Email Id",
-		"Is Primary Contact:Check",
+		f"{_(reference_doctype)}:Link/{reference_doctype}",
+		_("Address Line 1"),
+		_("Address Line 2"),
+		_("City"),
+		_("State"),
+		_("Postal Code"),
+		_("Country"),
+		f"{_('Is Primary Address')}:Check",
+		_("First Name"),
+		_("Last Name"),
+		_("Address"),
+		_("Phone"),
+		_("Email Id"),
+		f"{_('Is Primary Contact')}:Check",
 	]
 
 
 def get_data(filters):
-	data = []
 	reference_doctype = filters.get("reference_doctype")
 	reference_name = filters.get("reference_name")
 
@@ -76,12 +74,8 @@ def get_reference_addresses_and_contact(reference_doctype, reference_name):
 
 	for d in reference_list:
 		reference_details.setdefault(d, frappe._dict())
-	reference_details = get_reference_details(
-		reference_doctype, "Address", reference_list, reference_details
-	)
-	reference_details = get_reference_details(
-		reference_doctype, "Contact", reference_list, reference_details
-	)
+	reference_details = get_reference_details(reference_doctype, "Address", reference_list, reference_details)
+	reference_details = get_reference_details(reference_doctype, "Contact", reference_list, reference_details)
 
 	for reference_name, details in reference_details.items():
 		addresses = details.get("address", [])
@@ -112,7 +106,7 @@ def get_reference_details(reference_doctype, doctype, reference_list, reference_
 		["Dynamic Link", "link_doctype", "=", reference_doctype],
 		["Dynamic Link", "link_name", "in", reference_list],
 	]
-	fields = ["`tabDynamic Link`.link_name"] + field_map.get(doctype, [])
+	fields = ["`tabDynamic Link`.link_name", *field_map.get(doctype, [])]
 
 	records = frappe.get_list(doctype, filters=filters, fields=fields, as_list=True)
 	temp_records = [d[1:] for d in records]

@@ -15,7 +15,9 @@
   "attached_file",
   "attachment_link",
   "open_reference_document",
-  "from_user"
+  "from_user",
+  "link",
+  "email_header"
  ],
  "fields": [
   {
@@ -39,7 +41,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Type",
-   "options": "Mention\nEnergy Point\nAssignment\nShare\nAlert"
+   "options": "\nMention\nEnergy Point\nAssignment\nShare\nAlert"
   },
   {
    "fieldname": "email_content",
@@ -91,12 +93,23 @@
    "fieldname": "attachment_link",
    "fieldtype": "HTML",
    "label": "Attachment Link"
+  },
+  {
+   "fieldname": "link",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Link"
+  },
+  {
+   "fieldname": "email_header",
+   "fieldtype": "Data",
+   "label": "Email Header"
   }
  ],
  "hide_toolbar": 1,
  "in_create": 1,
  "links": [],
- "modified": "2023-06-14 21:20:51.197943",
+ "modified": "2025-05-30 20:17:44.969738",
  "modified_by": "Administrator",
  "module": "Desk",
  "name": "Notification Log",
@@ -112,7 +125,8 @@
    "share": 1
   }
  ],
- "sort_field": "modified",
+ "row_format": "Dynamic",
+ "sort_field": "creation",
  "sort_order": "DESC",
  "states": [],
  "title_field": "subject",

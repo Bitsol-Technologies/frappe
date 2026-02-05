@@ -29,6 +29,15 @@ export default class ShortcutWidget extends Widget {
 		this.widget.click((e) => {
 			if (this.in_customize_mode) return;
 
+			if (this.type == "DocType" && this.doc_view == "New") {
+				frappe.ui.form.make_quick_entry(
+					this.link_to,
+					// Callback to ensure no redirection after insert
+					() => {}
+				);
+				return;
+			}
+
 			let route = frappe.utils.generate_route({
 				route: this.route,
 				name: this.link_to,
@@ -37,6 +46,7 @@ export default class ShortcutWidget extends Widget {
 				doctype: this.ref_doctype,
 				doc_view: this.doc_view,
 				kanban_board: this.kanban_board,
+				report_ref_doctype: this.report_ref_doctype,
 			});
 
 			let filters = frappe.utils.get_filter_from_json(this.stats_filter);
@@ -49,12 +59,7 @@ export default class ShortcutWidget extends Widget {
 			}
 
 			if (this.type == "URL") {
-				if (frappe.open_in_new_tab) {
-					window.open(this.url, "_blank");
-					frappe.open_in_new_tab = false;
-				} else {
-					window.location.href = this.url;
-				}
+				window.open(this.url, "_blank");
 				return;
 			}
 
@@ -64,14 +69,31 @@ export default class ShortcutWidget extends Widget {
 
 	set_actions() {
 		if (this.in_customize_mode) return;
+		let icon_to_append = frappe.utils.icon("es-line-arrow-up-right", "xs", "", "", "ml-2");
+		if (frappe.utils.is_rtl(frappe.boot.lang)) {
+			icon_to_append = frappe.utils.icon("es-line-arrow-up-left", "xs", "", "", "ml-2");
+		}
+		$(icon_to_append).appendTo(this.action_area);
 
 		this.widget.addClass("shortcut-widget-box");
 
-		let filters = frappe.utils.get_filter_from_json(this.stats_filter);
-		if (this.type == "DocType" && filters) {
+		// Make it tabbable
+		this.widget.attr({
+			role: "link",
+			tabindex: 0,
+			"aria-label": this.label,
+		});
+
+		let filters = frappe.utils.process_filter_expression(this.stats_filter);
+
+		if (
+			this.type == "DocType" &&
+			this.doc_view != "New" &&
+			!frappe.boot.single_types.includes(this.link_to)
+		) {
 			frappe.db
 				.count(this.link_to, {
-					filters: filters,
+					filters: filters || [],
 				})
 				.then((count) => this.set_count(count));
 		}
@@ -88,7 +110,11 @@ export default class ShortcutWidget extends Widget {
 		this.action_area.empty();
 		const label = get_label();
 		let color = this.color && count ? this.color.toLowerCase() : "gray";
-		$(`<div class="indicator-pill ellipsis ${color}">${label}</div>`).appendTo(
+		$(
+			`<div class="indicator-pill no-indicator-dot ellipsis ${color}">${__(label)}</div>`
+		).appendTo(this.action_area);
+
+		$(frappe.utils.icon("es-line-arrow-up-right", "xs", "", "", "ml-2")).appendTo(
 			this.action_area
 		);
 	}

@@ -5,13 +5,13 @@ let store = useStore();
 
 const props = defineProps({
 	text: {
-		type: String
+		type: String,
 	},
 	placeholder: {
-		default: __("No Label")
+		default: __("No Label"),
 	},
 	empty_label: {
-		default: __("No Label")
+		default: __("No Label"),
 	},
 });
 
@@ -35,30 +35,32 @@ function focus_on_label() {
 		nextTick(() => input_text.value.focus());
 	}
 }
+
+defineExpose({ focus_on_label });
 </script>
 
 <template>
 	<div @dblclick="focus_on_label" :title="__('Double click to edit label')">
 		<input
 			v-if="editing"
-			class="input-text"
+			class="input-text bg-transparent"
 			ref="input_text"
 			:disabled="store.read_only"
 			type="text"
-			:placeholder="placeholder"
+			:placeholder="__(placeholder)"
 			:value="text"
 			:style="{ width: hidden_span_width }"
-			@input="event => $emit('update:modelValue', event.target.value)"
+			@input="(event) => $emit('update:modelValue', event.target.value)"
 			@keydown.enter="editing = false"
 			@blur="editing = false"
 			@click.stop
 		/>
-		<span v-else-if="text" v-html="text" ></span>
+		<span v-else-if="text" v-html="text"></span>
 		<i v-else class="text-muted">
-			{{ empty_label }}
+			{{ __(empty_label) }}
 		</i>
 		<span class="hidden-span" ref="hidden_text" v-html="text"></span>
-		<span class="hidden-span" ref="hidden_placeholder">{{ placeholder }}</span>
+		<span class="hidden-span" ref="hidden_placeholder">{{ __(placeholder) }}</span>
 	</div>
 </template>
 
@@ -70,7 +72,6 @@ function focus_on_label() {
 
 	&:focus {
 		outline: none;
-		border-radius: var(--border-radius);
 		background-color: inherit;
 	}
 

@@ -1,7 +1,11 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
+
+from __future__ import annotations
+
 import json
-from typing import TYPE_CHECKING, Union
+from collections import defaultdict
+from typing import TYPE_CHECKING
 
 import frappe
 from frappe import _
@@ -11,6 +15,9 @@ from frappe.utils import cint
 if TYPE_CHECKING:
 	from frappe.model.document import Document
 	from frappe.workflow.doctype.workflow.workflow import Workflow
+
+
+DEFAULT_WORKFLOW_TASKS = ["Webhook", "Server Script"]
 
 
 class WorkflowStateError(frappe.ValidationError):
@@ -28,9 +35,7 @@ class WorkflowPermissionError(frappe.ValidationError):
 def get_workflow_name(doctype):
 	workflow_name = frappe.cache.hget("workflow", doctype)
 	if workflow_name is None:
-		workflow_name = frappe.db.get_value(
-			"Workflow", {"document_type": doctype, "is_active": 1}, "name"
-		)
+		workflow_name = frappe.db.get_value("Workflow", {"document_type": doctype, "is_active": 1}, "name")
 		frappe.cache.hset("workflow", doctype, workflow_name or "")
 
 	return workflow_name
@@ -38,7 +43,7 @@ def get_workflow_name(doctype):
 
 @frappe.whitelist()
 def get_transitions(
-	doc: Union["Document", str, dict], workflow: "Workflow" = None, raise_exception: bool = False
+	doc: Document | str | dict, workflow: Workflow = None, raise_exception: bool = False
 ) -> list[dict]:
 	"""Return list of possible transitions for the given doc"""
 	from frappe.model.document import Document
@@ -93,9 +98,22 @@ def is_transition_condition_satisfied(transition, doc) -> bool:
 	if not transition.condition:
 		return True
 	else:
-		return frappe.safe_eval(
-			transition.condition, get_workflow_safe_globals(), dict(doc=doc.as_dict())
-		)
+		return frappe.safe_eval(transition.condition, get_workflow_safe_globals(), dict(doc=doc.as_dict()))
+
+
+def evaluate_workflow_value(value, evaluate_as_expression, doc):
+	if not value:
+		return None
+	if evaluate_as_expression:
+		try:
+			return frappe.safe_eval(value, get_workflow_safe_globals(), dict(doc=doc.as_dict()))
+		except Exception as e:
+			frappe.throw(
+				_("Invalid expression in Workflow Update Value: {0}").format(e),
+				title=_("Workflow Evaluation Error"),
+			)
+	else:
+		return value
 
 
 @frappe.whitelist()
@@ -123,20 +141,83 @@ def apply_workflow(doc, action):
 	doc.set(workflow.workflow_state_field, transition.next_state)
 
 	# find settings for the next state
-	next_state = [d for d in workflow.states if d.state == transition.next_state][0]
+	next_state = next(d for d in workflow.states if d.state == transition.next_state)
 
 	# update any additional field
 	if next_state.update_field:
-		doc.set(next_state.update_field, next_state.update_value)
+		update_value = evaluate_workflow_value(
+			next_state.update_value, next_state.evaluate_as_expression, doc
+		)
+		doc.set(next_state.update_field, update_value)
 
-	new_docstatus = cint(next_state.doc_status)
-	if doc.docstatus.is_draft() and new_docstatus == DocStatus.draft():
+	if transition.transition_tasks:
+		workflow_transitions = frappe.db.get_all(
+			"Workflow Transition Task",
+			{"parent": transition.transition_tasks, "enabled": True},
+			["task", "link", "asynchronous"],
+			order_by="idx",
+		)
+
+		"""app-specific actions defined by the user
+		Example:
+		def create_customer(doc):
+			<your-code>
+
+		this goes in the hooks.py
+		workflow_methods = [{"name": "Create a customer", "method":
+					 		"frappe.dotted.path.create_customer"}]
+		"""
+
+		tasks = {i["name"]: i["method"] for i in frappe.get_hooks("workflow_methods")}
+
+		sync_tasks = []
+		async_tasks = []
+		for workflow_transition in workflow_transitions:
+			# edge-case with user-defined server scripts
+			if workflow_transition.task in DEFAULT_WORKFLOW_TASKS:
+				match workflow_transition.task:
+					case "Webhook":
+						webhook = frappe.get_doc("Webhook", workflow_transition.link)
+						task_method = webhook.execute_for_doc
+
+					case "Server Script":
+						server_script = frappe.get_doc("Server Script", workflow_transition.link)
+						task_method = server_script.execute_workflow_task
+
+			else:  # normal app-defined tasks
+				try:
+					task_method = frappe.get_attr(tasks[workflow_transition.task])
+				except KeyError:
+					frappe.throw(_('There is no task called "{}"').format(workflow_transition.task))
+
+			if workflow_transition.asynchronous:
+				async_tasks.append(task_method)
+			else:
+				sync_tasks.append(task_method)
+
+		# will execute in the same transaction as the rest of the transition
+		for sync_task in sync_tasks:
+			sync_task(doc)
+
+		# will spawn separate background jobs. Use for asynchronous, optional tasks.
+		for async_task in async_tasks:
+			frappe.enqueue(async_task, doc=doc, enqueue_after_commit=True)
+
+	new_docstatus = DocStatus(next_state.doc_status or 0)
+	if doc.docstatus.is_draft() and new_docstatus.is_draft():
 		doc.save()
-	elif doc.docstatus.is_draft() and new_docstatus == DocStatus.submitted():
+	elif doc.docstatus.is_draft() and new_docstatus.is_submitted():
+		from frappe.core.doctype.submission_queue.submission_queue import queue_submission
+		from frappe.utils.scheduler import is_scheduler_inactive
+
+		if doc.meta.queue_in_background and not is_scheduler_inactive():
+			queue_submission(doc, "Submit")
+			return
+
 		doc.submit()
-	elif doc.docstatus.is_submitted() and new_docstatus == DocStatus.submitted():
+	elif doc.docstatus.is_submitted() and new_docstatus.is_submitted():
 		doc.save()
-	elif doc.docstatus.is_submitted() and new_docstatus == DocStatus.cancelled():
+	elif doc.docstatus.is_submitted() and new_docstatus.is_cancelled():
 		doc.cancel()
 	else:
 		frappe.throw(_("Illegal Document Status for {0}").format(next_state.state))
@@ -149,12 +230,13 @@ def apply_workflow(doc, action):
 @frappe.whitelist()
 def can_cancel_document(doctype):
 	workflow = get_workflow(doctype)
-	for state_doc in workflow.states:
-		if state_doc.doc_status == "2":
-			for transition in workflow.transitions:
-				if transition.next_state == state_doc.state:
-					return False
-			return True
+	cancelling_states = [s.state for s in workflow.states if s.doc_status == "2"]
+	if not cancelling_states:
+		return True
+
+	for transition in workflow.transitions:
+		if transition.next_state in cancelling_states:
+			return False
 	return True
 
 
@@ -214,9 +296,7 @@ def get_workflow(doctype) -> "Workflow":
 
 
 def has_approval_access(user, doc, transition):
-	return (
-		user == "Administrator" or transition.get("allow_self_approval") or user != doc.get("owner")
-	)
+	return user == "Administrator" or transition.get("allow_self_approval") or user != doc.get("owner")
 
 
 def get_workflow_state_field(workflow_name):
@@ -233,18 +313,31 @@ def get_workflow_field_value(workflow_name, field):
 
 @frappe.whitelist()
 def bulk_workflow_approval(docnames, doctype, action):
-	from collections import defaultdict
+	docnames = json.loads(docnames)
+	if len(docnames) < 20:
+		_bulk_workflow_action(docnames, doctype, action)
+	elif len(docnames) <= 500:
+		frappe.msgprint(_("Bulk {0} is enqueued in background.").format(action), alert=True)
+		frappe.enqueue(
+			_bulk_workflow_action,
+			docnames=docnames,
+			doctype=doctype,
+			action=action,
+			queue="short",
+			timeout=1000,
+			at_front_when_starved=True,
+		)
+	else:
+		frappe.throw(_("Bulk approval only support up to 500 documents."), title=_("Too Many Documents"))
 
+
+def _bulk_workflow_action(docnames, doctype, action):
 	# dictionaries for logging
 	failed_transactions = defaultdict(list)
 	successful_transactions = defaultdict(list)
 
-	# WARN: message log is cleared
-	print("Clearing frappe.message_log...")
 	frappe.clear_messages()
-
-	docnames = json.loads(docnames)
-	for (idx, docname) in enumerate(docnames, 1):
+	for idx, docname in enumerate(docnames, 1):
 		message_dict = {}
 		try:
 			show_progress(docnames, _("Applying: {0}").format(action), idx, docname)
@@ -273,7 +366,7 @@ def bulk_workflow_approval(docnames, doctype, action):
 						frappe.message_log.pop()
 						message_dict = {"docname": docname, "message": message.get("message")}
 
-						if message.get("raise_exception", False):
+						if message.get("raise_exception", False) or "Error" in message.get("message", ""):
 							failed_transactions[docname].append(message_dict)
 						else:
 							successful_transactions[docname].append(message_dict)
@@ -308,7 +401,9 @@ def print_workflow_log(messages, title, doctype, indicator):
 				html = f"<div>{doc}</div>"
 			msg += html
 
-		frappe.msgprint(msg, title=_("Workflow Status"), indicator=indicator, is_minimizable=True)
+		frappe.msgprint(
+			msg, title=_("Workflow Status"), indicator=indicator, is_minimizable=True, realtime=True
+		)
 
 
 @frappe.whitelist()
@@ -317,7 +412,7 @@ def get_common_transition_actions(docs, doctype):
 	if isinstance(docs, str):
 		docs = json.loads(docs)
 	try:
-		for (i, doc) in enumerate(docs, 1):
+		for i, doc in enumerate(docs, 1):
 			if not doc.get("doctype"):
 				doc["doctype"] = doctype
 			actions = [

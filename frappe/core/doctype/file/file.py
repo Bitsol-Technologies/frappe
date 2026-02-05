@@ -10,23 +10,39 @@ import zipfile
 from urllib.parse import quote, unquote
 
 from PIL import Image, ImageFile, ImageOps
-from requests.exceptions import HTTPError, SSLError
 
 import frappe
 from frappe import _
 from frappe.database.schema import SPECIAL_CHAR_PATTERN
+from frappe.exceptions import DoesNotExistError
 from frappe.model.document import Document
-from frappe.permissions import get_doctypes_with_read
-from frappe.utils import call_hook_method, cint, get_files_path, get_hook_method, get_url
+from frappe.permissions import SYSTEM_USER_ROLE, get_doctypes_with_read
+from frappe.utils import (
+	call_hook_method,
+	cint,
+	get_files_path,
+	get_hook_method,
+	get_url,
+)
 from frappe.utils.file_manager import is_safe_path
+from frappe.utils.html_utils import escape_html
 from frappe.utils.image import optimize_image, strip_exif_data
+from frappe.utils.pdf import pdf_contains_js
 
-from .exceptions import AttachmentLimitReached, FolderNotEmpty, MaxFileSizeReachedError
+from .exceptions import (
+	AttachmentLimitReached,
+	FileTypeNotAllowed,
+	FolderNotEmpty,
+	MaxFileSizeReachedError,
+)
 from .utils import *
 
 exclude_from_linked_with = True
-ImageFile.LOAD_TRUNCATED_IMAGES = True
-URL_PREFIXES = ("http://", "https://")
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True  # nosemgrep
+
+URL_PREFIXES = ("http://", "https://", "/api/method/")
+FILE_ENCODING_OPTIONS = ("utf-8-sig", "utf-8", "windows-1250", "windows-1252")
 
 
 class File(Document):
@@ -56,6 +72,7 @@ class File(Document):
 		uploaded_to_dropbox: DF.Check
 		uploaded_to_google_drive: DF.Check
 	# end: auto-generated types
+
 	no_feed_on_delete = True
 
 	def __init__(self, *args, **kwargs):
@@ -84,10 +101,15 @@ class File(Document):
 			self.name = frappe.generate_hash(length=10)
 
 	def before_insert(self):
+		# Ensure correct formatting and type
+		self.file_url = unquote(self.file_url) if self.file_url else ""
+
 		self.set_folder_name()
+		self.set_is_private()
 		self.set_file_name()
 		self.validate_attachment_limit()
 		self.set_file_type()
+		self.validate_file_extension()
 
 		if self.is_folder:
 			return
@@ -99,21 +121,18 @@ class File(Document):
 			self.flags.new_file = True
 			frappe.db.after_rollback.add(self.on_rollback)
 
+		self.validate_duplicate_entry()  # Hash is generated in save_file
+
 	def after_insert(self):
 		if not self.is_folder:
 			self.create_attachment_record()
-		self.set_is_private()
-		self.set_file_name()
-		self.validate_duplicate_entry()
 
 	def validate(self):
 		if self.is_folder:
 			return
 
-		# Ensure correct formatting and type
-		self.file_url = unquote(self.file_url) if self.file_url else ""
-
 		self.validate_attachment_references()
+		self.enforce_public_file_restrictions()
 
 		# when dict is passed to get_doc for creation of new_doc, is_new returns None
 		# this case is handled inside handle_is_private_changed
@@ -123,18 +142,29 @@ class File(Document):
 		self.validate_file_path()
 		self.validate_file_url()
 		self.validate_file_on_disk()
-
 		self.file_size = frappe.form_dict.file_size or self.file_size
 
 	def validate_attachment_references(self):
 		if not self.attached_to_doctype:
 			return
 
-		if not self.attached_to_name or not isinstance(self.attached_to_name, (str, int)):
-			frappe.throw(_("Attached To Name must be a string or an integer"), frappe.ValidationError)
+		if not self.attached_to_name or not isinstance(self.attached_to_name, str | int):
+			frappe.throw(
+				_("Attached To Name must be a string or an integer"),
+				frappe.ValidationError,
+			)
 
 		if self.attached_to_field and SPECIAL_CHAR_PATTERN.search(self.attached_to_field):
 			frappe.throw(_("The fieldname you've specified in Attached To Field is invalid"))
+
+	def enforce_public_file_restrictions(self):
+		if not self.is_private and frappe.get_system_settings(
+			"only_allow_system_managers_to_upload_public_files"
+		):
+			try:
+				frappe.only_for("System Manager")
+			except PermissionError:
+				frappe.throw(_("Only System Managers can make this file public."))
 
 	def after_rename(self, *args, **kwargs):
 		for successor in self.get_successors():
@@ -144,9 +174,10 @@ class File(Document):
 		if self.is_home_folder or self.is_attachments_folder:
 			frappe.throw(_("Cannot delete Home and Attachments folders"))
 		self.validate_empty_folder()
+		self.validate_protected_file()
 		self._delete_file_on_disk()
 		if not self.is_folder:
-			self.add_comment_in_reference_doc("Attachment Removed", _("Removed {0}").format(self.file_name))
+			self.add_comment_in_reference_doc("Attachment Removed", self.file_name)
 
 	def on_rollback(self):
 		rollback_flags = ("new_file", "original_content", "original_path")
@@ -204,8 +235,8 @@ class File(Document):
 		if self.is_remote_file or not self.file_url:
 			return
 
-		if not self.file_url.startswith(("/files/", "/private/files/")):
-			# Probably an invalid URL since it doesn't start with http either
+		if not self.file_url.startswith(("/files/", "/private/files/", "/api/method/")):
+			# Probably an invalid URL since it doesn't start with http and isn't an internal URL either
 			frappe.throw(
 				_("URL must start with http:// or https://"),
 				title=_("Invalid URL"),
@@ -309,7 +340,9 @@ class File(Document):
 			if current_attachment_count >= attachment_limit:
 				frappe.throw(
 					_("Maximum Attachment Limit of {0} has been reached for {1} {2}.").format(
-						frappe.bold(attachment_limit), self.attached_to_doctype, self.attached_to_name
+						frappe.bold(attachment_limit),
+						self.attached_to_doctype,
+						self.attached_to_name,
 					),
 					exc=AttachmentLimitReached,
 					title=_("Attachment Limit Reached"),
@@ -353,6 +386,25 @@ class File(Document):
 		if not os.path.exists(full_path):
 			frappe.throw(_("File {0} does not exist").format(self.file_url), IOError)
 
+	def validate_file_extension(self):
+		# Only validate uploaded files, not generated by code/integrations.
+		if not self.file_type or not frappe.request:
+			return
+
+		allowed_extensions = frappe.get_system_settings("allowed_file_extensions")
+		if not allowed_extensions:
+			return
+
+		if self.file_type not in allowed_extensions.splitlines():
+			frappe.throw(
+				_("File type of {0} is not allowed").format(self.file_type),
+				exc=FileTypeNotAllowed,
+			)
+
+	def check_content(self):
+		if self.file_type == "PDF" and self._content and pdf_contains_js(self._content):
+			frappe.throw(_("This PDF cannot be uploaded as it contains unsafe content."))
+
 	def validate_duplicate_entry(self):
 		if not self.flags.ignore_duplicate_entry_error and not self.is_folder:
 			if not self.content_hash:
@@ -363,8 +415,11 @@ class File(Document):
 			filters = {
 				"content_hash": self.content_hash,
 				"is_private": self.is_private,
-				"name": ("!=", self.name),
 			}
+
+			if self.name:
+				filters.update({"name": ("!=", self.name)})
+
 			if self.attached_to_doctype and self.attached_to_name:
 				filters.update(
 					{
@@ -383,7 +438,8 @@ class File(Document):
 	def set_file_name(self):
 		if not self.file_name and not self.file_url:
 			frappe.throw(
-				_("Fields `file_name` or `file_url` must be set for File"), exc=frappe.MandatoryError
+				_("Fields `file_name` or `file_url` must be set for File"),
+				exc=frappe.MandatoryError,
 			)
 		elif not self.file_name and self.file_url:
 			self.file_name = self.file_url.split("/")[-1]
@@ -409,6 +465,8 @@ class File(Document):
 		suffix: str = "small",
 		crop: bool = False,
 	) -> str:
+		from requests.exceptions import HTTPError, SSLError
+
 		if not self.file_url:
 			return
 
@@ -445,11 +503,46 @@ class File(Document):
 		if self.is_folder and frappe.get_all("File", filters={"folder": self.name}, limit=1):
 			frappe.throw(_("Folder {0} is not empty").format(self.name), FolderNotEmpty)
 
+	def validate_protected_file(self):
+		"""Throw an exception if this file is attached to a doctype that protects files.
+
+		Allows deleting the attached file if the linked document is in draft. If submitted,
+		deletion is not allowed. If canceled, requires delete permissions on the linked document.
+		"""
+		if not (self.attached_to_doctype and self.attached_to_name):
+			return
+
+		try:
+			ref_doc = frappe.get_doc(self.attached_to_doctype, self.attached_to_name)
+		except DoesNotExistError:
+			return
+
+		if ref_doc.docstatus == 0:
+			# If the document is not submitted yet, users can correct wrong attachments
+			return
+
+		if not ref_doc.meta.protect_attached_files:
+			return
+
+		if ref_doc.docstatus == 2 and ref_doc.has_permission("delete"):
+			# Deletion must still be possible if users have the permission to delete the linked document
+			return
+
+		frappe.throw(
+			msg=_("This file is attached to a protected document and cannot be deleted."),
+			title=_("Protected File"),
+		)
+
 	def _delete_file_on_disk(self):
 		"""If file not attached to any other record, delete it"""
 		on_disk_file_not_shared = self.content_hash and not frappe.get_all(
 			"File",
-			filters={"content_hash": self.content_hash, "name": ["!=", self.name]},
+			filters={
+				"content_hash": self.content_hash,
+				"name": ["!=", self.name],
+				# NOTE: Some old Files might share file_urls while not sharing the is_private value
+				# "is_private": self.is_private,
+			},
 			limit=1,
 		)
 		if on_disk_file_not_shared:
@@ -495,10 +588,11 @@ class File(Document):
 	def exists_on_disk(self):
 		return os.path.exists(self.get_full_path())
 
-	def get_content(self) -> bytes:
+	def get_content(self, encodings=None) -> bytes | str:
 		if self.is_folder:
 			frappe.throw(_("Cannot get file contents of a Folder"))
 
+		# if doc was just created, content field is already populated, return it as-is
 		if self.get("content"):
 			self._content = self.content
 			if self.decode:
@@ -511,20 +605,25 @@ class File(Document):
 			self.validate_file_url()
 		file_path = self.get_full_path()
 
-		# read the file
+		if encodings is None:
+			encodings = FILE_ENCODING_OPTIONS
 		with open(file_path, mode="rb") as f:
 			self._content = f.read()
-			try:
-				# for plain text files
-				self._content = self._content.decode()
-			except UnicodeDecodeError:
-				# for .png, .jpg, etc
-				pass
+			# looping will not result in slowdown, as the content is usually utf-8 or utf-8-sig
+			# encoded so the first iteration will be enough most of the time
+			for encoding in encodings:
+				try:
+					# read file with proper encoding
+					self._content = self._content.decode(encoding)
+					break
+				except UnicodeDecodeError:
+					# for .png, .jpg, etc
+					continue
 
 		return self._content
 
 	def get_full_path(self):
-		"""Returns file path from given file name"""
+		"""Return file path using the set file name."""
 
 		file_path = self.file_url or self.file_name
 
@@ -567,7 +666,7 @@ class File(Document):
 
 		if isinstance(self._content, str):
 			self._content = self._content.encode()
-
+		self.check_content()
 		with open(file_path, "wb+") as f:
 			f.write(self._content)
 			os.fsync(f.fileno())
@@ -624,9 +723,13 @@ class File(Document):
 			)
 
 		if duplicate_file:
-			file_doc: "File" = frappe.get_cached_doc("File", duplicate_file.name)
+			file_doc: File = frappe.get_cached_doc("File", duplicate_file.name)
 			if file_doc.exists_on_disk():
-				self.file_url = duplicate_file.file_url
+				if self.exists_on_disk():
+					if not self.file_url:
+						self.file_url = duplicate_file.file_url
+				else:
+					self.file_url = duplicate_file.file_url
 				file_exists = True
 
 		if not file_exists:
@@ -643,10 +746,11 @@ class File(Document):
 			return self.save_file_on_filesystem()
 
 	def save_file_on_filesystem(self):
+		safe_file_name = re.sub(r"[/\\%?#]", "_", self.file_name)
 		if self.is_private:
-			self.file_url = f"/private/files/{self.file_name}"
+			self.file_url = f"/private/files/{safe_file_name}"
 		else:
-			self.file_url = f"/files/{self.file_name}"
+			self.file_url = f"/files/{safe_file_name}"
 
 		fpath = self.write_file()
 
@@ -659,10 +763,10 @@ class File(Document):
 		file_size = len(self._content or b"")
 
 		if file_size > max_file_size:
-			frappe.throw(
-				_("File size exceeded the maximum allowed size of {0} MB").format(max_file_size / 1048576),
-				exc=MaxFileSizeReachedError,
-			)
+			msg = _("File size exceeded the maximum allowed size of {0} MB").format(max_file_size / 1048576)
+			if frappe.has_permission("System Settings", "write"):
+				msg += ".<br>" + _("You can increase the limit from System Settings.")
+			frappe.throw(msg, exc=MaxFileSizeReachedError)
 
 		return file_size
 
@@ -685,19 +789,17 @@ class File(Document):
 		return has_permission(self, "read")
 
 	def get_extension(self):
-		"""returns split filename and extension"""
+		"""Split and return filename and extension for the set `file_name`."""
 		return os.path.splitext(self.file_name)
 
 	def create_attachment_record(self):
 		icon = ' <i class="fa fa-lock text-warning"></i>' if self.is_private else ""
-		file_url = (
-			quote(frappe.safe_encode(self.file_url), safe="/:") if self.file_url else self.file_name
-		)
-		file_name = self.file_name or self.file_url
+		file_url = quote(frappe.safe_encode(self.file_url), safe="/:") if self.file_url else self.file_name
+		file_name = escape_html(self.file_name or self.file_url)
 
 		self.add_comment_in_reference_doc(
 			"Attachment",
-			_("Added {0}").format(f"<a href='{file_url}' target='_blank'>{file_name}</a>{icon}"),
+			f"<a href='{file_url}' target='_blank'>{file_name}</a>{icon}",
 		)
 
 	def add_comment_in_reference_doc(self, comment_type, text):
@@ -709,6 +811,9 @@ class File(Document):
 				frappe.clear_messages()
 
 	def set_is_private(self):
+		if self.is_private:
+			return
+
 		if self.file_url:
 			self.is_private = cint(self.file_url.startswith("/private"))
 
@@ -736,6 +841,16 @@ class File(Document):
 		self.save_file(content=optimized_content, overwrite=True)
 		self.save()
 
+	@property
+	def unique_url(self) -> str:
+		"""Unique URL contains file ID in URL to speed up permisison checks."""
+		from urllib.parse import urlencode
+
+		if self.is_private:
+			return self.file_url + "?" + urlencode({"fid": self.name})
+		else:
+			return self.file_url
+
 	@staticmethod
 	def zip_files(files):
 		zip_file = io.BytesIO()
@@ -756,40 +871,53 @@ class File(Document):
 
 def on_doctype_update():
 	frappe.db.add_index("File", ["attached_to_doctype", "attached_to_name"])
+	frappe.db.add_index("File", ["file_url(100)"])
 
 
-def has_permission(doc, ptype=None, user=None):
+def has_permission(doc, ptype=None, user=None, debug=False):
 	user = user or frappe.session.user
 
-	if ptype == "create":
-		return frappe.has_permission("File", "create", user=user)
+	if user == "Administrator":
+		return True
 
-	if not doc.is_private or (user != "Guest" and doc.owner == user) or user == "Administrator":
+	if not doc.is_private and ptype in ("read", "select"):
+		return True
+
+	if user != "Guest" and doc.owner == user:
 		return True
 
 	if doc.attached_to_doctype and doc.attached_to_name:
 		attached_to_doctype = doc.attached_to_doctype
 		attached_to_name = doc.attached_to_name
 
-		ref_doc = frappe.get_doc(attached_to_doctype, attached_to_name)
+		try:
+			ref_doc = frappe.get_doc(attached_to_doctype, attached_to_name)
+		except (ModuleNotFoundError, ImportError):
+			return False
+		except frappe.DoesNotExistError:
+			frappe.clear_last_message()
+			return False
 
 		if ptype in ["write", "create", "delete"]:
-			return ref_doc.has_permission("write")
+			return ref_doc.has_permission("write", debug=debug, user=user)
 		else:
-			return ref_doc.has_permission("read")
+			return ref_doc.has_permission("read", debug=debug, user=user)
 
 	return False
 
 
-def get_permission_query_conditions(user: str = None) -> str:
+def get_permission_query_conditions(user: str | None = None) -> str:
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return ""
 
+	if SYSTEM_USER_ROLE not in frappe.get_roles(user):
+		return f""" `tabFile`.`owner` = {frappe.db.escape(user)} """
+
 	readable_doctypes = ", ".join(repr(dt) for dt in get_doctypes_with_read())
 	return f"""
 		(`tabFile`.`is_private` = 0)
-		OR (`tabFile`.`attached_to_doctype` IS NULL AND `tabFile`.`owner` = {user !r})
+		OR (`tabFile`.`attached_to_doctype` IS NULL AND `tabFile`.`owner` = {frappe.db.escape(user)})
 		OR (`tabFile`.`attached_to_doctype` IN ({readable_doctypes}))
 	"""
 

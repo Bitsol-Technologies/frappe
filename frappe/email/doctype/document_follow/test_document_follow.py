@@ -11,10 +11,10 @@ from frappe.desk.like import toggle_like
 from frappe.query_builder import DocType
 from frappe.query_builder.functions import Cast_
 from frappe.share import add as share
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase
 
 
-class TestDocumentFollow(FrappeTestCase):
+class TestDocumentFollow(IntegrationTestCase):
 	def test_document_follow_version(self):
 		user = get_user()
 		event_doc = get_event()
@@ -91,9 +91,7 @@ class TestDocumentFollow(FrappeTestCase):
 		frappe.set_user(user.name)
 		event = get_event()
 
-		add_comment(
-			event.doctype, event.name, "This is a test comment", "Administrator@example.com", "Bosh"
-		)
+		add_comment(event.doctype, event.name, "This is a test comment", "Administrator@example.com", "Bosh")
 
 		documents_followed = get_events_followed_by_user(event.name, user.name)
 		self.assertTrue(documents_followed)
@@ -103,9 +101,7 @@ class TestDocumentFollow(FrappeTestCase):
 		frappe.set_user(user.name)
 		event = get_event()
 
-		add_comment(
-			event.doctype, event.name, "This is a test comment", "Administrator@example.com", "Bosh"
-		)
+		add_comment(event.doctype, event.name, "This is a test comment", "Administrator@example.com", "Bosh")
 
 		documents_followed = get_events_followed_by_user(event.name, user.name)
 		self.assertFalse(documents_followed)

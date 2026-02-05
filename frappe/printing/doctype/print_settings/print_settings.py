@@ -22,10 +22,9 @@ class PrintSettings(Document):
 		allow_print_for_draft: DF.Check
 		enable_print_server: DF.Check
 		enable_raw_printing: DF.Check
-		font: DF.Literal[
-			"Default", "Helvetica Neue", "Arial", "Helvetica", "Inter", "Verdana", "Monospace"
-		]
+		font: DF.Literal["Default", "Helvetica Neue", "Arial", "Helvetica", "Inter", "Verdana", "Monospace"]
 		font_size: DF.Float
+		pdf_generator: DF.Literal["wkhtmltopdf", "chrome"]
 		pdf_page_height: DF.Float
 		pdf_page_size: DF.Literal[
 			"A0",
@@ -66,6 +65,7 @@ class PrintSettings(Document):
 		send_print_as_pdf: DF.Check
 		with_letterhead: DF.Check
 	# end: auto-generated types
+
 	def validate(self):
 		if self.pdf_page_size == "Custom" and not (self.pdf_page_height and self.pdf_page_width):
 			frappe.throw(_("Page height and width cannot be zero"))
@@ -76,9 +76,4 @@ class PrintSettings(Document):
 
 @frappe.whitelist()
 def is_print_server_enabled():
-	if not hasattr(frappe.local, "enable_print_server"):
-		frappe.local.enable_print_server = cint(
-			frappe.db.get_single_value("Print Settings", "enable_print_server")
-		)
-
-	return frappe.local.enable_print_server
+	return frappe.get_single_value("Print Settings", "enable_print_server")

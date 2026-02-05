@@ -1,15 +1,15 @@
 context("Number Card", () => {
 	before(() => {
 		cy.login();
-		cy.visit("/app/website");
+		cy.visit("/desk/website");
 	});
 
 	it("Check filter populate for child table doctype", () => {
-		cy.visit("/app/number-card/new-number-card-1");
+		cy.new_form("Number Card");
 		cy.get('[data-fieldname="parent_document_type"]').should("have.css", "display", "none");
 
 		cy.get_field("document_type", "Link");
-		cy.fill_field("document_type", "Workspace Link", "Link").focus().blur();
+		cy.fill_field("document_type", "Workspace Link", "Link");
 		cy.get_field("document_type", "Link").should("have.value", "Workspace Link");
 
 		cy.fill_field("label", "Test Number Card", "Data");

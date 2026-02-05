@@ -4,12 +4,14 @@ import os
 import random
 import string
 import unittest
+from unittest.case import skipIf
 from unittest.mock import patch
 
 import frappe
 from frappe.cache_manager import clear_doctype_cache
 from frappe.core.doctype.doctype.doctype import (
 	CannotIndexedError,
+	DocType,
 	DoctypeLinkError,
 	HiddenAndMandatoryWithoutDefaultError,
 	IllegalMandatoryError,
@@ -18,12 +20,16 @@ from frappe.core.doctype.doctype.doctype import (
 	WrongOptionsDoctypeLinkError,
 	validate_links_table_fieldnames,
 )
+from frappe.core.doctype.rq_job.test_rq_job import wait_for_completion
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.desk.form.load import getdoc
-from frappe.tests.utils import FrappeTestCase
+from frappe.model.delete_doc import delete_controllers
+from frappe.model.sync import remove_orphan_doctypes
+from frappe.tests import IntegrationTestCase
+from frappe.utils import get_table_name
 
 
-class TestDocType(FrappeTestCase):
+class TestDocType(IntegrationTestCase):
 	def tearDown(self):
 		frappe.db.rollback()
 
@@ -42,6 +48,10 @@ class TestDocType(FrappeTestCase):
 			doc = new_doctype(name).insert()
 			doc.delete()
 
+	@skipIf(
+		frappe.conf.db_type == "sqlite",
+		"Not for SQLite for now",
+	)
 	def test_making_sequence_on_change(self):
 		frappe.delete_doc_if_exists("DocType", self._testMethodName)
 		dt = new_doctype(self._testMethodName).insert(ignore_permissions=True)
@@ -143,24 +153,25 @@ class TestDocType(FrappeTestCase):
 	def test_all_depends_on_fields_conditions(self):
 		import re
 
-		docfields = frappe.get_all(
-			"DocField",
-			or_filters={
-				"ifnull(depends_on, '')": ("!=", ""),
-				"ifnull(collapsible_depends_on, '')": ("!=", ""),
-				"ifnull(mandatory_depends_on, '')": ("!=", ""),
-				"ifnull(read_only_depends_on, '')": ("!=", ""),
-			},
-			fields=[
-				"parent",
-				"depends_on",
-				"collapsible_depends_on",
-				"mandatory_depends_on",
-				"read_only_depends_on",
-				"fieldname",
-				"fieldtype",
-			],
+		DocField = frappe.qb.DocType("DocField")
+		docfields_query = (
+			frappe.qb.from_(DocField)
+			.select(
+				DocField.parent,
+				DocField.depends_on,
+				DocField.collapsible_depends_on,
+				DocField.mandatory_depends_on,
+				DocField.read_only_depends_on,
+				DocField.fieldname,
+			)
+			.where(
+				(DocField.depends_on != "")
+				| (DocField.collapsible_depends_on != "")
+				| (DocField.mandatory_depends_on != "")
+				| (DocField.read_only_depends_on != "")
+			)
 		)
+		docfields = docfields_query.run(as_dict=True)
 
 		pattern = r'[\w\.:_]+\s*={1}\s*[\w\.@\'"]+'
 		for field in docfields:
@@ -217,9 +228,7 @@ class TestDocType(FrappeTestCase):
 			self.assertListEqual(
 				[f["fieldname"] for f in test_doctype_json["fields"]], test_doctype_json["field_order"]
 			)
-			self.assertListEqual(
-				[f["fieldname"] for f in test_doctype_json["fields"]], initial_fields_order
-			)
+			self.assertListEqual([f["fieldname"] for f in test_doctype_json["fields"]], initial_fields_order)
 			self.assertListEqual(test_doctype_json["field_order"], initial_fields_order)
 
 			# remove field_order to test reload_doc/sync/migrate is backwards compatible without field_order
@@ -243,9 +252,7 @@ class TestDocType(FrappeTestCase):
 			self.assertListEqual(
 				[f["fieldname"] for f in test_doctype_json["fields"]], test_doctype_json["field_order"]
 			)
-			self.assertListEqual(
-				[f["fieldname"] for f in test_doctype_json["fields"]], initial_fields_order
-			)
+			self.assertListEqual([f["fieldname"] for f in test_doctype_json["fields"]], initial_fields_order)
 			self.assertListEqual(test_doctype_json["field_order"], initial_fields_order)
 
 			# reorder fields: swap row 1 and 3
@@ -256,9 +263,7 @@ class TestDocType(FrappeTestCase):
 			# assert that reordering fields only affects `field_order` rather than `fields` attr
 			test_doctype.save()
 			test_doctype_json = frappe.get_file_json(path)
-			self.assertListEqual(
-				[f["fieldname"] for f in test_doctype_json["fields"]], initial_fields_order
-			)
+			self.assertListEqual([f["fieldname"] for f in test_doctype_json["fields"]], initial_fields_order)
 			self.assertListEqual(
 				test_doctype_json["field_order"], ["field_3", "field_2", "field_1", "field_4"]
 			)
@@ -739,6 +744,21 @@ class TestDocType(FrappeTestCase):
 		self.assertEqual(frappe.get_meta(doctype).get_field(field).default, "DELETETHIS")
 		frappe.delete_doc("DocType", doctype)
 
+	@unittest.skipUnless(
+		os.access(frappe.get_app_path("frappe"), os.W_OK), "Only run if frappe app paths is writable"
+	)
+	@patch.dict(frappe.conf, {"developer_mode": 1})
+	def test_delete_orphaned_doctypes(self):
+		doctype = new_doctype(custom=0).insert()
+		frappe.db.commit()
+
+		delete_controllers(doctype.name, doctype.module)
+		job = frappe.enqueue(remove_orphan_doctypes)
+		wait_for_completion(job)
+
+		frappe.db.rollback()
+		self.assertFalse(frappe.db.exists("DocType", doctype.name))
+
 	def test_not_in_list_view_for_not_allowed_mandatory_field(self):
 		doctype = new_doctype(
 			fields=[
@@ -761,6 +781,105 @@ class TestDocType(FrappeTestCase):
 		self.assertTrue(doctype.fields[1].in_list_view)
 		frappe.delete_doc("DocType", doctype.name)
 
+	def test_no_recursive_fetch(self):
+		recursive_dt = new_doctype(
+			fields=[
+				{
+					"label": "User",
+					"fieldname": "user",
+					"fieldtype": "Link",
+					"fetch_from": "user.email",
+				}
+			],
+		)
+		self.assertRaises(frappe.ValidationError, recursive_dt.insert)
+
+	def test_meta_serialization(self):
+		doctype = new_doctype(
+			fields=[{"fieldname": "some_fieldname", "fieldtype": "Data", "set_only_once": 1}],
+			is_submittable=1,
+		).insert()
+		doc = frappe.new_doc(doctype.name, some_fieldname="something").insert()
+		doc.save()
+		doc.submit()
+		frappe.get_meta(doctype.name).as_dict()
+
+	def test_row_compression(self):
+		if frappe.db.db_type != "mariadb":
+			return
+
+		compressed_dt = new_doctype(row_format="Compressed").insert().name
+		dynamic_dt = new_doctype().insert().name
+
+		information_schema = frappe.qb.Schema("information_schema")
+
+		def get_format(dt):
+			return (
+				frappe.qb.from_(information_schema.tables)
+				.select("row_format")
+				.where(
+					(information_schema.tables.table_schema == frappe.conf.db_name)
+					& (information_schema.tables.table_name == get_table_name(dt))
+				)
+				.run()[0][0]
+				.upper()
+			)
+
+		self.assertEqual(get_format(compressed_dt), "COMPRESSED")
+		self.assertEqual(get_format(dynamic_dt), "DYNAMIC")
+
+	def test_decimal_field_configuration(self):
+		doctype = new_doctype(
+			"Test Decimal Config",
+			fields=[
+				{
+					"fieldname": "decimal_field",
+					"fieldtype": "Currency",
+					"length": 30,
+					"precision": 3,
+				}
+			],
+		).insert(ignore_if_duplicate=True)
+		decimal_field_type = frappe.db.get_column_type(doctype.name, "decimal_field")
+		if frappe.db.db_type == "postgres":
+			result = frappe.db.sql(
+				"""
+				SELECT numeric_precision, numeric_scale
+				FROM information_schema.columns
+				WHERE lower(table_name) = lower(%s)
+				AND column_name = %s
+				""",
+				(f"tab{doctype.name}", "decimal_field"),
+			)
+			length, precision = result[0]
+			self.assertEqual((length, precision), (30, 3))
+		elif frappe.db.db_type == "mariadb":
+			self.assertIn("(30,3)", decimal_field_type.lower())
+
+	def test_decimal_field_precision_exceeds_length(self):
+		doctype = new_doctype(
+			"Test Decimal Config 2",
+			fields=[
+				{
+					"fieldname": "decimal_field",
+					"fieldtype": "Currency",
+					"length": 10,
+					"precision": 11,
+				}
+			],
+		)
+		self.assertRaises(frappe.ValidationError, doctype.insert)
+
+	def test_delete_doc_clears_cache(self):
+		dt = new_doctype(
+			fields=[{"fieldname": "test_fdname", "fieldtype": "Data", "label": "Test Field"}],
+		).insert()
+		frappe.get_meta(dt.name)
+		frappe.delete_doc("DocType", dt.name, force=1, delete_permanently=False)
+		frappe.db.commit()
+		with self.assertRaises(frappe.DoesNotExistError):
+			frappe.get_meta(dt.name)
+
 
 def new_doctype(
 	name: str | None = None,
@@ -768,8 +887,9 @@ def new_doctype(
 	depends_on: str = "",
 	fields: list[dict] | None = None,
 	custom: bool = True,
+	default: str | None = None,
 	**kwargs,
-):
+) -> "DocType":
 	if not name:
 		# Test prefix is required to avoid coverage
 		name = "Test " + "".join(random.sample(string.ascii_lowercase, 10))
@@ -785,6 +905,7 @@ def new_doctype(
 					"fieldname": "some_fieldname",
 					"fieldtype": "Data",
 					"unique": unique,
+					"default": default,
 					"depends_on": depends_on,
 				}
 			],
