@@ -4,6 +4,7 @@
 import email.utils
 import functools
 import imaplib
+import inspect
 import time
 from datetime import datetime, timedelta
 from poplib import error_proto
@@ -28,20 +29,23 @@ class SentEmailInInbox(Exception):
 
 def cache_email_account(cache_name):
 	def decorator_cache_email_account(func):
+		signature = inspect.signature(func)
+
 		@functools.wraps(func)
 		def wrapper_cache_email_account(*args, **kwargs):
 			if not hasattr(frappe.local, cache_name):
 				setattr(frappe.local, cache_name, {})
 
 			cached_accounts = getattr(frappe.local, cache_name)
-			match_by = [*list(kwargs.values()), "default"]
-			matched_accounts = list(filter(None, [cached_accounts.get(key) for key in match_by]))
-			if matched_accounts:
-				return matched_accounts[0]
+			lookup = signature.bind(*args, **kwargs).arguments
+			match_by = (lookup.get("match_by_email"), lookup.get("match_by_doctype"))
+			if account := cached_accounts.get(match_by):
+				return account
 
-			matched_accounts = func(*args, **kwargs)
-			cached_accounts.update(matched_accounts or {})
-			return matched_accounts and next(iter(matched_accounts.values()))
+			account = func(*args, **kwargs)
+			if account:
+				cached_accounts[match_by] = account
+			return account
 
 		return wrapper_cache_email_account
 
@@ -157,6 +161,7 @@ class EmailAccount(Document):
 		if not frappe.local.flags.in_install and not self.awaiting_password:
 			if validate_oauth or self.password or self.smtp_server in ("127.0.0.1", "localhost"):
 				if self.enable_incoming:
+					self.flags.validate_imap_pop_connection = True
 					self.get_incoming_server()
 					self.no_failed = 0
 
@@ -184,8 +189,9 @@ class EmailAccount(Document):
 		if not self.smtp_server:
 			frappe.throw(_("SMTP Server is required"))
 
-		server = self.get_smtp_server()
-		return server.session
+		self.flags.validate_smtp_connection = True
+		self.get_smtp_server().session
+		del self._smtp_server_instance
 
 	def before_save(self):
 		messages = []
@@ -271,6 +277,9 @@ class EmailAccount(Document):
 
 		if not args.get("host"):
 			frappe.throw(_("{0} is required").format("Email Server"))
+
+		if self.flags.validate_imap_pop_connection:
+			args.timeout = 15
 
 		email_server = EmailServer(frappe._dict(args))
 		self.check_email_server_connection(email_server, in_receive)
@@ -372,7 +381,7 @@ class EmailAccount(Document):
 
 	@classmethod
 	def create_dummy(cls):
-		return cls.from_record({"sender": "notifications@example.com"})
+		return cls.from_record({"name": "Notifications", "email_id": "notifications@example.com"})
 
 	@classmethod
 	@cache_email_account("outgoing_email_account")
@@ -387,16 +396,16 @@ class EmailAccount(Document):
 			match_by_email = parse_addr(match_by_email)[1]
 			doc = cls.find_one_by_filters(enable_outgoing=1, email_id=match_by_email)
 			if doc:
-				return {match_by_email: doc}
+				return doc
 
 		if match_by_doctype:
 			doc = cls.find_one_by_filters(enable_outgoing=1, enable_incoming=1, append_to=match_by_doctype)
 			if doc:
-				return {match_by_doctype: doc}
+				return doc
 
 		doc = cls.find_default_outgoing()
 		if doc:
-			return {"default": doc}
+			return doc
 
 		if _raise_error:
 			frappe.throw(
@@ -475,7 +484,7 @@ class EmailAccount(Document):
 	def sendmail_config(self):
 		oauth_token = self.get_oauth_token()
 
-		return {
+		config = {
 			"email_account": self.name,
 			"server": self.smtp_server,
 			"port": cint(self.smtp_port),
@@ -486,6 +495,11 @@ class EmailAccount(Document):
 			"use_oauth": self.auth_method == "OAuth",
 			"access_token": oauth_token.get_password("access_token") if oauth_token else None,
 		}
+
+		if self.flags.validate_smtp_connection:
+			config["timeout"] = 15
+
+		return config
 
 	def get_smtp_server(self):
 		"""Get SMTPServer (wrapper around actual smtplib object) for this account.
@@ -668,7 +682,9 @@ class EmailAccount(Document):
 				sender=self.email_id,
 				reply_to=communication.incoming_email_account,
 				subject=" ".join([_("Re:"), communication.subject]),
-				content=render_template(self.auto_reply_message or "", communication.as_dict())
+				content=render_template(
+					self.auto_reply_message or "", communication.as_dict(), restrict_globals=True
+				)
 				or frappe.get_template("templates/emails/auto_reply.html").render(communication.as_dict()),
 				reference_doctype=communication.reference_doctype,
 				reference_name=communication.reference_name,
@@ -742,7 +758,14 @@ class EmailAccount(Document):
 
 
 @frappe.whitelist()
-def get_append_to(doctype=None, txt=None, searchfield=None, start=None, page_len=None, filters=None):
+def get_append_to(
+	doctype: str | None = None,
+	txt: str | None = None,
+	searchfield: str | None = None,
+	start: int | None = None,
+	page_len: int | None = None,
+	filters: list | dict | str | None = None,
+):
 	txt = txt if txt else ""
 
 	filters = {"istable": 0, "issingle": 0, "email_append_to": 1}
@@ -893,6 +916,7 @@ def get_max_email_uid(email_account):
 			"communication_medium": "Email",
 			"sent_or_received": "Received",
 			"email_account": email_account,
+			"uid": (">", 0),
 		},
 		fields=["max(uid) as uid"],
 	):
@@ -975,7 +999,8 @@ def remove_user_email_inbox(email_account):
 
 
 @frappe.whitelist()
-def set_email_password(email_account, password):
+def set_email_password(email_account: str, password: str):
+	frappe.has_permission("Email Account", "write", email_account, throw=True)
 	account = frappe.get_doc("Email Account", email_account)
 	if account.awaiting_password and account.auth_method != "OAuth":
 		account.awaiting_password = 0

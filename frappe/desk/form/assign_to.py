@@ -4,6 +4,7 @@
 """assign/unassign to ToDo"""
 
 import json
+from typing import Any
 
 import frappe
 import frappe.share
@@ -16,7 +17,6 @@ from frappe.desk.doctype.notification_log.notification_log import (
 )
 from frappe.desk.form.document_follow import follow_document
 from frappe.utils.data import strip_html
-from frappe.utils import escape_html
 
 
 class DuplicateToDoError(frappe.ValidationError):
@@ -41,7 +41,7 @@ def get(args=None):
 
 
 @frappe.whitelist()
-def add(args=None, *, ignore_permissions=False):
+def add(args: dict[str, Any] | None = None, *, ignore_permissions: bool = False):
 	"""add in someone's to do list
 	args = {
 			"assign_to": [],
@@ -61,47 +61,105 @@ def add(args=None, *, ignore_permissions=False):
 		- "assign_to": JSON list of individual assignee user IDs.
 		- "assign_to_employee_group": JSON list of Employee Group names.
 		- "doctype", "name", "description", "priority", "date", etc.
+
+	`ignore_permissions` is kept for backward compatibility with Python callers; it is
+	ignored when this function is served as an API endpoint. New code should call `_add`.
 	"""
+	endpoint_call = is_endpoint_call("frappe.desk.form.assign_to.add")
+	return _add(
+		args,
+		ignore_permissions=bool(ignore_permissions) and not endpoint_call,
+		validate_assignees=endpoint_call,
+	)
+
+
+def is_endpoint_call(method: str) -> bool:
+	"""True when `method` is the API endpoint being served, not a Python call from other code."""
+	request = getattr(frappe.local, "request", None)
+	return bool(request) and method in {
+		request.path.removesuffix("/").rpartition("/")[2],
+		frappe.form_dict.cmd,
+	}
+
+
+def _add(args=None, *, ignore_permissions=False, validate_assignees=False):
 	if not args:
 		args = frappe.local.form_dict
+
 	users_with_duplicate_todo = []
 	shared_with_users = []
 
-	description = escape_html(
-		args.get("description", _("Assignment for {0} {1}").format(args["doctype"], args["name"]))
-	)
+	description = args.get("description")
 
 	for assign_to in frappe.parse_json(args.get("assign_to") or "[]"):
-		create_assignment(assign_to, args, description,ignore_permissions,users_with_duplicate_todo, shared_with_users)
+		create_assignment(
+			assign_to,
+			args,
+			description,
+			ignore_permissions,
+			users_with_duplicate_todo,
+			shared_with_users,
+			validate_assignees=validate_assignees,
+		)
 
 	# --- New block for processing Employee Groups ---
 	# Process employee group assignments, if provided
-	for group in frappe.parse_json(args.get("assign_to_employee_group") or '[]'):
+	for group in frappe.parse_json(args.get("assign_to_employee_group") or "[]"):
 		if frappe.db.exists("Employee Group", group):
 			# Fetch employees from the child table "Employee Group Table" with proper filters
-			employees = frappe.get_all("Employee Group Table",
-				filters={
-					"parent": group,
-					"parentfield": "employee_list",
-					"parenttype": "Employee Group"
-				},
-				fields=["employee"]
+			employees = frappe.get_all(
+				"Employee Group Table",
+				filters={"parent": group, "parentfield": "employee_list", "parenttype": "Employee Group"},
+				fields=["employee"],
 			)
 			for row in employees:
 				employee_id = row.employee
 				# Lookup the system user linked to the employee
 				system_user = frappe.db.get_value("Employee", employee_id, "user_id")
 				if not system_user:
-					frappe.msgprint(_("Employee {0} does not have an associated system user. Skipping assignment.").format(employee_id))
+					frappe.msgprint(
+						_("Employee {0} does not have an associated system user. Skipping assignment.").format(
+							employee_id
+						)
+					)
 					continue
 
 				assign_to = system_user  # Use the system user for assignment
-				create_assignment(assign_to,args,description,ignore_permissions,users_with_duplicate_todo,shared_with_users)
+				create_assignment(
+					assign_to,
+					args,
+					description,
+					ignore_permissions,
+					users_with_duplicate_todo,
+					shared_with_users,
+				)
 
 		else:
 			frappe.msgprint(_("Employee Group {0} does not exist.").format(group))
 
-def create_assignment(assign_to, args, description, ignore_permissions, users_with_duplicate_todo, shared_with_users):
+	if shared_with_users:
+		user_list = format_message_for_assign_to(shared_with_users)
+		frappe.msgprint(
+			_("Shared with the following Users with Read access:{0}").format(user_list, alert=True)
+		)
+
+	if users_with_duplicate_todo:
+		user_list = format_message_for_assign_to(users_with_duplicate_todo)
+		frappe.msgprint(_("Already in the following Users ToDo list:{0}").format(user_list, alert=True))
+
+	return get(args)
+
+
+def create_assignment(
+	assign_to,
+	args,
+	description,
+	ignore_permissions,
+	users_with_duplicate_todo,
+	shared_with_users,
+	*,
+	validate_assignees=False,
+):
 	filters = {
 		"reference_type": args["doctype"],
 		"reference_name": args["name"],
@@ -111,12 +169,15 @@ def create_assignment(assign_to, args, description, ignore_permissions, users_wi
 	if not ignore_permissions:
 		frappe.get_doc(args["doctype"], args["name"]).check_permission()
 
+	if validate_assignees:
+		frappe.share.validate_user_access(assign_to, _("Allocated To"))
+
 	if frappe.get_all("ToDo", filters=filters):
 		users_with_duplicate_todo.append(assign_to)
 	else:
 		from frappe.utils import nowdate
 
-		description = str(args.get("description", ""))
+		description = args.get("description") or ""
 		has_content = strip_html(description) or "<img" in description
 		if not has_content:
 			args["description"] = _("Assignment for {0} {1}").format(args["doctype"], args["name"])
@@ -145,15 +206,13 @@ def create_assignment(assign_to, args, description, ignore_permissions, users_wi
 		# if assignee does not have permissions, share or inform
 		if not frappe.has_permission(doc=doc, user=assign_to):
 			if frappe.get_system_settings("disable_document_sharing"):
-				msg = _("User {0} is not permitted to access this document.").format(
-					frappe.bold(assign_to)
-				)
+				msg = _("User {0} is not permitted to access this document.").format(frappe.bold(assign_to))
 				msg += "<br>" + _(
 					"As document sharing is disabled, please give them the required permissions before assigning."
 				)
 				frappe.throw(msg, title=_("Missing Permission"))
 			else:
-				frappe.share.add(doc.doctype, doc.name, assign_to)
+				frappe.share.add_docshare(doc.doctype, str(doc.name), assign_to)
 				shared_with_users.append(assign_to)
 
 		# make this document followed by assigned user
@@ -170,21 +229,9 @@ def create_assignment(assign_to, args, description, ignore_permissions, users_wi
 			description=args.get("description"),
 		)
 
-	if shared_with_users:
-		user_list = format_message_for_assign_to(shared_with_users)
-		frappe.msgprint(
-			_("Shared with the following Users with Read access:{0}").format(user_list, alert=True)
-		)
-
-	if users_with_duplicate_todo:
-		user_list = format_message_for_assign_to(users_with_duplicate_todo)
-		frappe.msgprint(_("Already in the following Users ToDo list:{0}").format(user_list, alert=True))
-
-	return get(args)
-
 
 @frappe.whitelist()
-def add_multiple(args=None):
+def add_multiple(args: dict[str, Any] | None = None):
 	if not args:
 		args = frappe.local.form_dict
 
@@ -192,14 +239,14 @@ def add_multiple(args=None):
 
 	for docname in docname_list:
 		args.update({"name": docname})
-		add(args)
+		_add(args, ignore_permissions=False, validate_assignees=True)
 
 
 def close_all_assignments(doctype, name, ignore_permissions=False):
 	assignments = frappe.get_all(
 		"ToDo",
 		fields=["allocated_to", "name"],
-		filters=dict(reference_type=doctype, reference_name=name, status=("!=", "Cancelled")),
+		filters=dict(reference_type=doctype, reference_name=name, status=("not in", ["Cancelled", "Closed"])),
 	)
 	if not assignments:
 		return False
@@ -218,12 +265,16 @@ def close_all_assignments(doctype, name, ignore_permissions=False):
 
 
 @frappe.whitelist()
-def remove(doctype, name, assign_to, ignore_permissions=False):
+def remove(doctype: str, name: str | int, assign_to: str):
+	return _remove(doctype, name, assign_to, ignore_permissions=False)
+
+
+def _remove(doctype, name, assign_to, ignore_permissions=False):
 	return set_status(doctype, name, "", assign_to, status="Cancelled", ignore_permissions=ignore_permissions)
 
 
 @frappe.whitelist()
-def remove_multiple(doctype, names, ignore_permissions=False):
+def remove_multiple(doctype: str, names: str):
 	docname_list = json.loads(names)
 
 	for name in docname_list:
@@ -233,15 +284,15 @@ def remove_multiple(doctype, names, ignore_permissions=False):
 			continue
 
 		for assignment in assignments:
-			remove(doctype, name, assignment.get("owner"), ignore_permissions)
+			remove(doctype, name, assignment.get("owner"))
 
 
 @frappe.whitelist()
-def close(doctype: str, name: str, assign_to: str, ignore_permissions=False):
+def close(doctype: str, name: str, assign_to: str):
 	if assign_to != frappe.session.user:
 		frappe.throw(_("Only the assignee can complete this to-do."))
 
-	return set_status(doctype, name, "", assign_to, status="Closed", ignore_permissions=ignore_permissions)
+	return set_status(doctype, name, "", assign_to, status="Closed", ignore_permissions=False)
 
 
 def set_status(doctype, name, todo=None, assign_to=None, status="Cancelled", ignore_permissions=False):
@@ -345,4 +396,3 @@ def notify_assignment(assigned_by, allocated_to, doc_type, doc_name, action="CLO
 
 def format_message_for_assign_to(users):
 	return "<br><br>" + "<br>".join(users)
-

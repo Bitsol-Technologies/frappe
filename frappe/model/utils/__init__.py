@@ -57,6 +57,7 @@ class InvalidIncludePath(frappe.ValidationError):
 
 def render_include(content):
 	"""render {% raw %}{% include "app/path/filename" %}{% endraw %} in js file"""
+	import os
 
 	content = cstr(content)
 
@@ -69,7 +70,13 @@ def render_include(content):
 
 			for path in paths:
 				app, app_path = path.split("/", 1)
-				with open(frappe.get_app_path(app, app_path), encoding="utf-8") as f:
+
+				resolved_path = os.path.realpath(frappe.get_app_path(app, app_path))
+				app_root = os.path.realpath(frappe.get_app_path(app))
+				if not resolved_path.startswith(app_root + os.sep):
+					frappe.throw(frappe._("Security Error: The Path provided is not safe."))
+
+				with open(resolved_path, encoding="utf-8") as f:
 					include = f.read()
 					if path.endswith(".html"):
 						include = html_to_js_template(path, include)
@@ -138,7 +145,7 @@ def is_virtual_doctype(doctype: str):
 
 @site_cache()
 def is_single_doctype(doctype: str) -> bool:
-	from frappe.model.base_document import DOCTYPES_FOR_DOCTYPE
+	from frappe.model.document import DOCTYPES_FOR_DOCTYPE
 
 	if doctype in DOCTYPES_FOR_DOCTYPE:
 		return False

@@ -98,9 +98,7 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 			title: __("Add to ToDo"),
 			fields: me.get_fields(),
 			primary_action_label: __("Add"),
-			primary_action: function () {
-				let args = me.dialog.get_values();
-
+			primary_action: function (args) {
 				if (args && (args.assign_to || args.assign_to_employee_group)) {
 					me.dialog.set_message("Assigning...");
 
@@ -282,7 +280,6 @@ frappe.ui.form.AssignmentDialog = class {
 							this.assigning = true;
 							this.dialog.set_df_property("user", "read_only", 1);
 							this.dialog.set_df_property("user", "description", __("Assigning..."));
-							console.log("after assigning");
 							this.add_assignment(value)
 								.then(() => {
 									this.dialog.set_value("user", null);
@@ -314,7 +311,6 @@ frappe.ui.form.AssignmentDialog = class {
 		this.frm && this.frm.assign_to.render(assignments);
 	}
 	add_assignment(assignment) {
-		console.log("add btn called");
 		return frappe
 			.xcall("frappe.desk.form.assign_to.add", {
 				doctype: this.frm.doctype,
