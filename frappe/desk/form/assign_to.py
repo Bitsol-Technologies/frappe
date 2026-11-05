@@ -125,6 +125,21 @@ def _add(args=None, *, ignore_permissions=False, validate_assignees=False):
 					continue
 
 				assign_to = system_user  # Use the system user for assignment
+
+				# Same User Permission check as directly picked assignees, but skip the
+				# member instead of failing the whole group assignment.
+				if validate_assignees:
+					try:
+						frappe.share.validate_user_access(assign_to, _("Allocated To"))
+					except frappe.LinkValidationError:
+						frappe.clear_last_message()
+						frappe.msgprint(
+							_("You are not permitted to assign {0} (Employee {1}). Skipping assignment.").format(
+								assign_to, employee_id
+							)
+						)
+						continue
+
 				create_assignment(
 					assign_to,
 					args,
