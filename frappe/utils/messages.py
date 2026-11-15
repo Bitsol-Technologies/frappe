@@ -1,4 +1,3 @@
-import functools
 import sys
 from collections.abc import Sequence
 from typing import Literal
@@ -7,8 +6,6 @@ import frappe
 from frappe import _
 from frappe.utils import strip_html_tags
 from frappe.utils.data import safe_decode
-
-_strip_html_tags = functools.lru_cache(maxsize=1024)(strip_html_tags)
 
 
 def msgprint(
@@ -24,6 +21,7 @@ def msgprint(
 	wide: bool = False,
 	*,
 	realtime=False,
+	allow_dangerous_html=False,
 ) -> None:
 	"""Print a message to the user (via HTTP response).
 	Messages are sent in the `__server_messages` property in the
@@ -38,8 +36,11 @@ def msgprint(
 	:param is_minimizable: [optional] Allow users to minimize the modal
 	:param wide: [optional] Show wide modal
 	:param realtime: Publish message immediately using websocket.
+	:param allow_dangerous_html: Allow arbitrary HTML in message.
 	"""
 	import inspect
+
+	from frappe.utils.html_utils import clean_html
 
 	msg = safe_decode(msg)
 	out = frappe._dict(message=msg)
@@ -67,16 +68,25 @@ def msgprint(
 		else:
 			out.as_table = as_table
 
-	if sys.stdin and sys.stdin.isatty():
+	if not allow_dangerous_html:
 		if out.as_list:
-			msg = [_strip_html_tags(cell) for cell in msg]
+			out.message = [clean_html(cell) for cell in msg]
 		elif out.as_table:
-			msg = [[_strip_html_tags(cell) for cell in row] for row in msg]
+			out.message = [[clean_html(cell) for cell in row] for row in msg]
 		else:
-			msg = _strip_html_tags(msg)
+			out.message = clean_html(msg)
 
 	if frappe.flags.print_messages and out.message:
-		print(f"Message: {msg}")
+		terminal_msg = msg
+		if sys.stdin and sys.stdin.isatty():
+			if out.as_list:
+				terminal_msg = [strip_html_tags(cell) for cell in msg]
+			elif out.as_table:
+				terminal_msg = [[strip_html_tags(cell) for cell in row] for row in msg]
+			else:
+				terminal_msg = strip_html_tags(msg)
+
+		print(f"Message: {terminal_msg}")
 
 	out.title = title or _("Message", context="Default title of the message dialog")
 
@@ -134,6 +144,8 @@ def throw(
 	wide: bool = False,
 	as_list: bool = False,
 	primary_action=None,
+	*,
+	allow_dangerous_html=False,
 ) -> None:
 	"""Throw execption and show message (`msgprint`).
 
@@ -154,6 +166,7 @@ def throw(
 		wide=wide,
 		as_list=as_list,
 		primary_action=primary_action,
+		allow_dangerous_html=allow_dangerous_html,
 	)
 
 

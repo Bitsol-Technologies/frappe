@@ -6,6 +6,7 @@ class RealTimeClient {
 	constructor() {
 		this.open_tasks = {};
 		this.open_docs = new Set();
+		this.disabled = false;
 	}
 
 	on(event, callback) {
@@ -22,6 +23,7 @@ class RealTimeClient {
 	}
 
 	connect() {
+		if (this.disabled) return;
 		if (this.lazy_connect) {
 			this.socket.connect();
 			this.lazy_connect = false;
@@ -29,12 +31,14 @@ class RealTimeClient {
 	}
 
 	emit(event, ...args) {
+		if (this.disabled) return;
 		this.connect();
 		this.socket.emit(event, ...args);
 	}
 
 	init(port = 9000, lazy_connect = false) {
 		if (frappe.boot.disable_async) {
+			this.disabled = true;
 			return;
 		}
 
@@ -174,10 +178,10 @@ class RealTimeClient {
 		this.emit("doc_close", doctype, docname);
 	}
 	setup_listeners() {
-		this.socket.on("task_status_change", function (data) {
+		this.socket.on("task_status_change", (data) => {
 			this.process_response(data, data.status.toLowerCase());
 		});
-		this.socket.on("task_progress", function (data) {
+		this.socket.on("task_progress", (data) => {
 			this.process_response(data, "progress");
 		});
 	}
@@ -188,6 +192,9 @@ class RealTimeClient {
 
 		// success
 		let opts = this.open_tasks[data.task_id];
+		if (!opts) {
+			return;
+		}
 		if (opts[method]) {
 			opts[method](data);
 		}

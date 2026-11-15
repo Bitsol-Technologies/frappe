@@ -180,7 +180,7 @@ def redis_cache(ttl: int | None = 3600, user: str | bool | None = None, shared: 
 		func_key = f"{func.__module__}.{func.__qualname__}"
 
 		def clear_cache():
-			frappe.cache.delete_keys(func_key)
+			frappe.cache.delete_keys(func_key, user=user, shared=shared)
 
 		func.clear_cache = clear_cache
 		func.ttl = ttl if not callable(ttl) else 3600
@@ -195,7 +195,7 @@ def redis_cache(ttl: int | None = 3600, user: str | bool | None = None, shared: 
 			# Edge Case: None can mean two things: cache miss or the result itself is `None`
 			# RedisWrapper doesn't give us any way to handle this cleanly.
 			if frappe.cache.exists(func_call_key, user=user, shared=shared):
-				return None
+				return frappe.cache.get_value(func_call_key, user=user, shared=shared, use_local_cache=False)
 
 			val = func(*args, **kwargs)
 			ttl = getattr(func, "ttl", 3600)
