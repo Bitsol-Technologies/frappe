@@ -1316,6 +1316,15 @@ class Document(_DocumentBase):
 
 		for perm in self.get_permissions():
 			if perm.role in roles and perm.get(permission_type) and perm.permlevel not in allowed_permlevels:
+				# Bitsol: a rule marked "Only if Creator" grants its permlevel only to the document's
+				# owner or linked user (`user_id`, e.g. Employee), so that managers opening their
+				# direct reports' records do not get the higher permlevel fields.
+				if (
+					perm.if_owner
+					and frappe.session.user != self.get("user_id")
+					and frappe.session.user != self.get("owner")
+				):
+					continue
 				allowed_permlevels.append(perm.permlevel)
 
 		return allowed_permlevels

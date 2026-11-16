@@ -34,6 +34,8 @@ class SystemSettings(Document):
 		backup_limit: DF.Int
 		bypass_2fa_for_retricted_ip_users: DF.Check
 		bypass_restrict_ip_check_if_2fa_enabled: DF.Check
+		clockify_api_key: DF.Data | None
+		clockify_workspace_id: DF.SmallText | None
 		country: DF.Link | None
 		currency: DF.Link | None
 		currency_precision: DF.Literal["", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
@@ -96,6 +98,7 @@ class SystemSettings(Document):
 			"#,###",
 		]
 		only_allow_system_managers_to_upload_public_files: DF.Check
+		operation_compliance_channel: DF.Data | None
 		otp_issuer_name: DF.Data | None
 		otp_sms_template: DF.SmallText | None
 		password_reset_limit: DF.Int
@@ -108,6 +111,9 @@ class SystemSettings(Document):
 		setup_complete: DF.Check
 		show_absolute_datetime_in_timeline: DF.Check
 		show_external_link_warning: DF.Literal["Never", "Ask", "Always"]
+		slack_api_url: DF.Data | None
+		slack_post_message_url: DF.Data | None
+		slack_token: DF.Data | None
 		store_attached_pdf_document: DF.Check
 		strip_exif_metadata_from_uploaded_images: DF.Check
 		sync_in_batch: DF.Check

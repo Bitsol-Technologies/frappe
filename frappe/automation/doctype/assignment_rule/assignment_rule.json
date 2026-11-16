@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "allow_import": 1,
  "allow_rename": 1,
  "autoname": "Prompt",
  "creation": "2019-02-28 17:12:18.815830",
@@ -178,7 +179,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-03-03 13:08:12.561504",
+ "modified": "2026-11-15 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Automation",
  "name": "Assignment Rule",

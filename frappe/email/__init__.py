@@ -173,6 +173,11 @@ def sendmail(
 	add_css=True,
 	redact_message_after_send=False,
 	wrapper=None,
+	*,
+	for_users=None,
+	create_notification_log=False,
+	from_users=None,
+	email_template_name=None,
 ) -> EmailQueue | None:
 	"""Send email using user's default **Email Account** or global default **Email Account**.
 
@@ -207,6 +212,10 @@ def sendmail(
 	    :param raw_html: Whether to treat email template as a complete HTML file
 	    :param add_css: Whether to add CSS from hooks/email_css to the email template
 	    :param redact_message_after_send: Replace the message body with a placeholder once sent, for emails carrying sensitive content.
+	    :param for_users: (Bitsol, keyword-only) Users who get a Notification Log when `create_notification_log` is set. Defaults to `recipients`.
+	    :param create_notification_log: (Bitsol, keyword-only) Also create an "Alert" Notification Log for every `for_users` entry.
+	    :param from_users: (Bitsol, keyword-only) Users the Notification Logs are created on behalf of (`from_user` / `owner`). Defaults to the session user.
+	    :param email_template_name: (Bitsol, keyword-only) Name of an **Email Template** document; its subject and response rendered with `args` replace `subject` and the message.
 	"""
 
 	from frappe.utils.jinja import get_email_from_template
@@ -234,6 +243,31 @@ def sendmail(
 
 	if communication and not (recipients or cc or bcc):
 		frappe.throw(frappe._("At least one recipient is required"))
+
+	# Bitsol: render subject/body from a DB Email Template. The formatted response is used as the
+	# email message, the plain (non-HTML) response as the push text of the notification log.
+	push_content = content
+	if email_template_name:
+		email_template = frappe.get_doc("Email Template", email_template_name)
+		subject = email_template.get_formatted_subject(args)
+		header = subject
+		message = email_template.get_formatted_response(args)
+		push_content = (
+			frappe.render_template(email_template.response, args) if email_template.response else None
+		)
+
+	# Bitsol: optionally mirror the email as in-app / push Notification Logs.
+	if create_notification_log and recipients:
+		_create_sendmail_notification_logs(
+			for_users=for_users or recipients,
+			from_users=from_users,
+			subject=subject,
+			message=message,
+			push_text=(args or {}).get("reminder_text") or push_content or message,
+			reference_doctype=reference_doctype,
+			reference_name=reference_name,
+			attachments=attachments,
+		)
 
 	from frappe.email.doctype.email_queue.email_queue import QueueBuilder
 
@@ -281,3 +315,76 @@ def sendmail(
 	if now and q:
 		frappe.db.after_commit.add(q.send)
 	return q
+
+
+def _create_sendmail_notification_logs(
+	for_users,
+	from_users,
+	subject,
+	message,
+	push_text,
+	reference_doctype=None,
+	reference_name=None,
+	attachments=None,
+):
+	"""Bitsol: create an "Alert" Notification Log per (from_user, for_user) pair for a sendmail call.
+
+	Failures never block the email: each insert runs in a savepoint and errors are logged.
+	"""
+	from frappe.email.email_body import inline_style_in_html
+
+	save_point = "sendmail_notification_log"
+
+	if isinstance(for_users, str):
+		for_users = [for_users]
+	if isinstance(from_users, str):
+		from_users = [from_users]
+	if not from_users:
+		# v15 read `doctype.owner` here (always an AttributeError); fall back to the session user.
+		from_users = [frappe.session.user]
+
+	# `attached_file` is a JSON Code field; only keep attachments that can be serialised
+	# (print-format dicts), never raw file content.
+	attached_file = None
+	if attachments:
+		try:
+			attached_file = frappe.as_json(attachments)
+		except Exception:
+			attached_file = None
+
+	email_content = inline_style_in_html(message) if message else message
+
+	for from_user in from_users:
+		if not from_user:
+			continue
+		for for_user in for_users:
+			if not for_user:
+				continue
+			# savepoint: a failed insert (e.g. `for_user` is not a User) must not poison the
+			# caller's transaction or block the email.
+			frappe.db.savepoint(save_point)
+			message_count = len(frappe.local.message_log)
+			try:
+				notification_log = frappe.new_doc("Notification Log")
+				notification_log.update(
+					{
+						"from_user": from_user,
+						"for_user": for_user,
+						"owner": from_user,
+						"subject": subject,
+						"email_content": email_content,
+						"push_text": push_text,
+						"type": "Alert",
+						"document_type": reference_doctype,
+						"document_name": reference_name,
+						"attached_file": attached_file,
+					}
+				)
+				notification_log.insert(ignore_permissions=True)
+			except Exception:
+				frappe.db.rollback(save_point=save_point)
+				# drop the validation popups raised by the failed insert
+				frappe.local.message_log = frappe.local.message_log[:message_count]
+				frappe.log_error(title="Error while creating notification log from sendmail")
+			else:
+				frappe.db.release_savepoint(save_point)

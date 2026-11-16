@@ -241,10 +241,8 @@ frappe.PermissionEngine = class PermissionEngine {
 
 			this.set_show_users(role_cell, d.role);
 
-			if (d.permlevel === 0) {
-				// this.setup_user_permissions(d, role_cell);
-				this.setup_if_owner(d, role_cell);
-			}
+			// Bitsol: "Only if Creator" can be set on rules of any permlevel (upstream: level 0 only)
+			this.setup_if_owner(d, role_cell);
 
 			let cell = this.add_cell(row, d, "permlevel");
 
@@ -283,9 +281,8 @@ frappe.PermissionEngine = class PermissionEngine {
 
 	add_check(cell, d, fieldname, label, description = "") {
 		if (!label) label = toTitle(fieldname.replace(/_/g, " "));
-		if (d.permlevel > 0 && ["read", "write", "mask"].indexOf(fieldname) == -1) {
-			return;
-		}
+		// Bitsol: all rights (and "Only if Creator") are offered on rules of any permlevel
+		// (upstream: only read, write and mask above level 0)
 
 		let checkbox = $(
 			`<div class='col-md-4'>

@@ -111,7 +111,16 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 			fields: me.get_fields(),
 			primary_action_label: __("Add"),
 			primary_action: function (args) {
-				if (args.assign_to) {
+				// Bitsol: either users or Employee Groups (or both) must be given
+				const has_users = args && args.assign_to && args.assign_to.length;
+				const has_groups =
+					args && args.assign_to_employee_group && args.assign_to_employee_group.length;
+				if (!has_users && !has_groups) {
+					frappe.show_alert({
+						message: __("Select at least one user or Employee Group to assign to"),
+						indicator: "orange",
+					});
+				} else {
 					me.dialog.set_message("Assigning...");
 
 					frappe.call({
@@ -120,6 +129,7 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 							doctype: me.doctype,
 							name: me.docname,
 							assign_to: args.assign_to,
+							assign_to_employee_group: args.assign_to_employee_group,
 							bulk_assign: me.bulk_assign || false,
 							re_assign: me.re_assign || false,
 						}),
@@ -178,6 +188,11 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 	get_fields() {
 		let me = this;
 
+		// Bitsol: Employee Group is an erpnext doctype. Only offer the field when the
+		// doctype exists on this site and the user may search it.
+		const can_use_employee_groups =
+			frappe.model.can_read("Employee Group") || frappe.model.can_select("Employee Group");
+
 		return [
 			{
 				label: __("Assign to me"),
@@ -187,10 +202,21 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 				onchange: () => me.assign_to_me(),
 			},
 			{
+				label: __("Assign To Employee Group"),
+				fieldtype: "MultiSelectPills",
+				fieldname: "assign_to_employee_group",
+				hidden: !can_use_employee_groups,
+				get_data: function (txt) {
+					if (!can_use_employee_groups) return [];
+					return frappe.db.get_link_options("Employee Group", txt);
+				},
+			},
+			{
 				fieldtype: "MultiSelectPills",
 				fieldname: "assign_to",
 				label: __("Assign To"),
-				reqd: true,
+				// not mandatory when Employee Groups can be picked instead
+				reqd: !can_use_employee_groups,
 				get_data: function (txt) {
 					return frappe.db.get_link_options("User", txt, {
 						user_type: "System User",
@@ -199,6 +225,7 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 				},
 			},
 			{
+				// upstream field, kept alongside Bitsol's Employee Group picker
 				label: __("Assign To User Group"),
 				fieldtype: "Link",
 				fieldname: "assign_to_user_group",

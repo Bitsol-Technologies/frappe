@@ -183,6 +183,9 @@ def has_permission(doc, ptype="read", user=None):
 	if "System Manager" in frappe.get_roles(user):
 		return doc.name != "Administrator"
 
+	if "HR Executive" in frappe.get_roles(user):
+		return doc.name != "Administrator"
+
 	return doc.name == user
 
 

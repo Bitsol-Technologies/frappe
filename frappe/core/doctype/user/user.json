@@ -120,7 +120,13 @@
   "onboarding_status",
   "connections_tab",
   "sessions_tab",
-  "active_sessions"
+  "active_sessions",
+  "notifications_tab",
+  "notifications_section",
+  "slack_uid",
+  "is_clockify_active",
+  "is_birthday_notification_active",
+  "is_anniversary_notification_active"
  ],
  "fields": [
   {
@@ -445,7 +451,9 @@
    "permlevel": 1
   },
   {
-   "depends_on": "eval:in_list(['System User'], doc.user_type)",
+   "collapsible": 1,
+   "collapsible_depends_on": "eval:in_list(['System User', 'Administrator'], doc.user_type)",
+   "depends_on": "eval:in_list(['System User', 'Administrator'], doc.user_type)",
    "fieldname": "sb_allow_modules",
    "fieldtype": "Section Break",
    "label": "Allow Modules",
@@ -598,13 +606,15 @@
    "fieldname": "third_party_authentication",
    "fieldtype": "Section Break",
    "label": "Third Party Authentication",
-   "permlevel": 1
+   "permlevel": 1,
+   "read_only": 1
   },
   {
    "fieldname": "social_logins",
    "fieldtype": "Table",
    "label": "Social Logins",
-   "options": "User Social Login"
+   "options": "User Social Login",
+   "permlevel": 1
   },
   {
    "collapsible": 1,
@@ -662,7 +672,8 @@
    "fieldname": "module_profile",
    "fieldtype": "Link",
    "label": "Module Profile",
-   "options": "Module Profile"
+   "options": "Module Profile",
+   "permlevel": 1
   },
   {
    "description": "Stores the datetime when the last reset password key was generated.",
@@ -904,6 +915,39 @@
    "fieldname": "form_navigation_buttons",
    "fieldtype": "Check",
    "label": "Show navigation buttons"
+  },
+  {
+   "fieldname": "notifications_tab",
+   "fieldtype": "Tab Break",
+   "label": "Notifications"
+  },
+  {
+   "fieldname": "notifications_section",
+   "fieldtype": "Section Break",
+   "label": "Notifications"
+  },
+  {
+   "fieldname": "slack_uid",
+   "fieldtype": "Data",
+   "label": "Slack User ID"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_clockify_active",
+   "fieldtype": "Check",
+   "label": "Send clockify notification"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_birthday_notification_active",
+   "fieldtype": "Check",
+   "label": "Send birthday notification"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_anniversary_notification_active",
+   "fieldtype": "Check",
+   "label": "Send anniversary reminder"
   }
  ],
  "icon": "user-round",
@@ -957,7 +1001,7 @@
   }
  ],
  "make_attachments_public": 1,
- "modified": "2026-10-01 05:17:48.844566",
+ "modified": "2026-11-15 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Core",
  "name": "User",

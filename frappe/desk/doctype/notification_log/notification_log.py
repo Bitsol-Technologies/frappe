@@ -29,6 +29,7 @@ class NotificationLog(Document):
 		for_user: DF.Link | None
 		from_user: DF.Link | None
 		link: DF.SmallText | None
+		push_text: DF.Text | None
 		read: DF.Check
 		source_doctype: DF.Link | None
 		source_name: DF.DynamicLink | None
@@ -266,6 +267,26 @@ def get_notification_logs(limit: int = 20):
 
 
 @frappe.whitelist()
+def get_paginated_notification_logs(start: int = 1, limit: int = 20):
+	"""Bitsol mobile API: page through the session user's notification logs.
+
+	`start` is a 0-based offset; the default of 1 is kept from the v15 implementation.
+	"""
+	notification_logs = frappe.db.get_list(
+		"Notification Log", fields=["*"], start=start, limit=limit, order_by="modified desc"
+	)
+
+	users = [log.from_user for log in notification_logs]
+	users = [*set(users)]  # remove duplicates
+	user_info = frappe._dict()
+
+	for user in users:
+		frappe.utils.add_user_info(user, user_info)
+
+	return {"notification_logs": notification_logs, "user_info": user_info}
+
+
+@frappe.whitelist()
 def mark_all_as_read():
 	frappe.db.set_value(
 		"Notification Log",
@@ -298,5 +319,18 @@ def trigger_indicator_hide():
 def set_notifications_as_unseen(user):
 	try:
 		frappe.db.set_value("Notification Settings", user, "seen", 0, update_modified=False)
+	except frappe.DoesNotExistError:
+		return
+
+
+@frappe.whitelist()
+def get_notifications_value():
+	"""Bitsol mobile API: `{name, seen}` of the session user's Notification Settings."""
+	user = frappe.session.user
+	try:
+		notification_settings = frappe.db.get_value(
+			"Notification Settings", {"name": user}, ["name", "seen"], as_dict=True
+		)
+		return notification_settings
 	except frappe.DoesNotExistError:
 		return

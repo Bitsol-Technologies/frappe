@@ -18,6 +18,12 @@ function authenticate_with_frappe(socket, next) {
 		next(new Error("Invalid namespace"));
 	}
 
+	// Bitsol: clients that send no Origin header (mobile app / some proxies) were rejected
+	// with "Invalid origin". Fall back to the Referer host; it must still match Host below.
+	if (!socket.request.headers.origin && socket.request.headers.referer) {
+		socket.request.headers.origin = "https://" + get_hostname(socket.request.headers.referer);
+	}
+
 	if (get_hostname(socket.request.headers.host) != get_hostname(socket.request.headers.origin)) {
 		next(new Error("Invalid origin"));
 		return;
